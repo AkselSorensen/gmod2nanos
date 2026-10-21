@@ -84,3 +84,63 @@ def test_retarget_matches_mannequin(tmp_path: Path):
     # 6. les os inconnus (mèche de cheveux) sont rattachés à la tête
     head_idx = names.index("head")
     assert any(j[0] == head_idx for prim in prims for j in prim["joints"])
+
+
+NANOS_REF = Path(__file__).parent / "data" / "nanos_mannequin_reference.json"
+
+
+def test_retarget_on_real_nanos_mannequin(tmp_path: Path):
+    """Pose de référence réelle de SKEL_Mannequin (ADK nanos world) : noms avec majuscules, os en plus."""
+    _, out = _convert_character(tmp_path)
+    ref = json.loads(NANOS_REF.read_text())
+    src = out / "1-unreal/Eric/Characters/SK_eric_source.gltf"
+    dst = str(out / "1-unreal/Eric/Characters/SK_eric.gltf")
+    names = rt.retarget_file(str(src), ref, dst, "SK_eric")
+
+    # les vrais noms de l'ADK sont repris tels quels
+    for n in ("Root", "Pelvis", "UpperArm_L", "Hand_R", "Head", "Thigh_L", "Foot_R", "spine_01", "lowerarm_l"):
+        assert n in names
+    # os non standard sans parent mesuré : écartés (sinon SKEL_Mannequin refuserait le mesh)
+    for n in ("weapon_l", "LeftEye", "head_end"):
+        assert n not in names
+
+    _, bones, prims = rt.load_source(dst)
+    world = {b["name"]: b["world"] for b in bones}
+    parent = {b["name"]: (bones[b["parent"]]["name"] if b["parent"] >= 0 else None) for b in bones}
+    assert parent["Pelvis"] == "Root" and parent["UpperArm_L"] == "clavicle_l" and parent["Hand_L"] == "lowerarm_l"
+    mw = {n: rt.from_qt(d["q"], d["t"]) for n, d in ref.items()}
+    for n in names:
+        for i in range(3):
+            for j in range(3):
+                assert abs(world[n][i][j] - rt.orthonormalize(mw[n])[i][j]) < 1e-3, n
+    canon = {n.lower(): n for n in names}
+    for a, b in rt.POSE_CHAIN:
+        da = rt.norm(rt.sub(rt.trans(world[canon[b]]), rt.trans(world[canon[a]])))
+        dm = rt.norm(rt.sub(rt.trans(mw[canon[b]]), rt.trans(mw[canon[a]])))
+        assert rt.dot(da, dm) > 0.999, (a, b)
+    # le personnage regarde vers +Y comme le Mannequin : jambe gauche en +X, orteils devant
+    assert rt.trans(world["Thigh_L"])[0] > 0
+    assert rt.trans(world["ball_l"])[1] > rt.trans(world["Foot_L"])[1]
+
+
+def test_find_parent_from_local_poses():
+    import math as m
+
+    hier = {"root": None, "hips": "root", "hand": "hips", "weapon": "hand", "hand_end": "hand"}
+    local_qt = {
+        "root": ([0, 0, 0], [0, 0, 0, 1]),
+        "hips": ([0, 0, 90], [0, 0, m.sin(0.3), m.cos(0.3)]),
+        "hand": ([40, 5, 20], [m.sin(0.4), 0, 0, m.cos(0.4)]),
+        "weapon": ([3, 1, 0], [0, m.sin(0.2), 0, m.cos(0.2)]),
+        "hand_end": ([8, 0, 0], [0, 0, 0, 1]),
+    }
+    worlds = {}
+    for n in ("root", "hips", "hand", "weapon", "hand_end"):
+        loc = rt.from_qt(local_qt[n][1], local_qt[n][0])
+        worlds[n] = loc if hier[n] is None else rt.mul(worlds[hier[n]], loc)
+    world = {n: (rt.trans(w), rt.to_quat(w)) for n, w in worlds.items()}
+    local = {n: tuple(v) for n, v in local_qt.items()}
+    for n, p in hier.items():
+        if n == "root":
+            continue
+        assert rt.find_parent(n, world, local) == (p, True), n

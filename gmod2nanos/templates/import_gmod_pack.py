@@ -36,6 +36,17 @@ def import_file(path):
     return list(task.imported_object_paths or [])
 
 
+def disable_nanite(mesh):
+    """Les matériaux transparents de GMod (cheveux, vitres...) ne sont pas compatibles avec Nanite."""
+    try:
+        settings = mesh.get_editor_property("nanite_settings")
+        if settings.enabled:
+            settings.enabled = False
+            mesh.set_editor_property("nanite_settings", settings)
+    except Exception:
+        pass
+
+
 def add_collision(mesh):
     try:
         sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
@@ -71,6 +82,7 @@ with unreal.ScopedSlowTask(len(files), "Import des modèles GMod") as task:
         if mesh is None:
             failed.append(name)
             continue
+        disable_nanite(mesh)
         add_collision(mesh)
         eal.save_loaded_asset(mesh)
         ok += 1
@@ -102,26 +114,33 @@ def find_asset(paths, name):
     return None
 
 
-def pose_of(skeleton):
-    """Pose de référence monde d'un squelette : {os: (translation, quaternion)}."""
+def pose_of(skeleton, space=None):
+    """Pose de référence d'un squelette : {os: (translation, quaternion)} (monde par défaut)."""
     ape = unreal.AnimPoseExtensions
     pose = ape.get_reference_pose(skeleton)
+    space = space if space is not None else unreal.AnimPoseSpaces.WORLD
     out = {}
     for n in ape.get_bone_names(pose):
-        t = ape.get_bone_pose(pose, n, unreal.AnimPoseSpaces.WORLD)
+        t = ape.get_bone_pose(pose, n, space)
         tr, q = t.translation, t.rotation
         out[str(n)] = ([tr.x, tr.y, tr.z], [q.x, q.y, q.z, q.w])
     return out
 
 
 def mannequin_reference(skeleton):
-    pose = pose_of(skeleton)
+    """Pose monde de SKEL_Mannequin, avec le parent de chaque os retrouvé à partir des poses locales."""
+    world = pose_of(skeleton)
+    try:
+        local = pose_of(skeleton, unreal.AnimPoseSpaces.LOCAL)
+    except Exception as e:
+        unreal.log_warning("gmod2nanos : poses locales indisponibles (%s), os non standard ignorés" % e)
+        local = None
     ref = {}
-    for name, (t, q) in pose.items():
-        parent = rt.MANNEQUIN_PARENTS.get(name, "?")
-        if parent == "?":  # os propre à nanos world : on retrouve son parent le plus proche
-            parent = min((p for p in pose if p != name), key=lambda p: rt.dot(rt.sub(pose[p][0], t), rt.sub(pose[p][0], t)))
-        ref[name] = {"parent": parent if parent in pose else None, "t": t, "q": q}
+    for name, (t, q) in world.items():
+        parent, exact = (None, False)
+        if local is not None and name in local:
+            parent, exact = rt.find_parent(name, world, local)
+        ref[name] = {"parent": parent, "parent_exact": exact, "t": t, "q": q}
     return ref
 
 
@@ -158,7 +177,9 @@ def import_character(entry, skeleton, physics, ref):
     try:
         own = mesh.get_editor_property("skeleton")
         got = pose_of(own)
-        errs = [quat_angle(got[b][1], ref[b]["q"]) for b in rt.REQUIRED if b in got]
+        by_canon = {n.lower(): n for n in ref}
+        errs = [quat_angle(got[by_canon[b]][1], ref[by_canon[b]]["q"]) for b in rt.REQUIRED
+                if b in by_canon and by_canon[b] in got]
         worst = max(errs) if errs else 0
         if worst > 5:
             unreal.log_warning("gmod2nanos : %s : orientation des os différente du Mannequin (%.0f°), "

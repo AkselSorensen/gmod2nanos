@@ -343,13 +343,42 @@ def _bfs(parents):
 # ---------------------------------------------------------------------------
 # Reciblage
 # ---------------------------------------------------------------------------
+def resolve_hierarchy(mannequin):
+    """Hiérarchie du Mannequin, en noms canoniques (minuscules).
+
+    Les os connus du Mannequin UE4 prennent la hiérarchie standard ; les autres (yeux, *_end...) ne sont gardés
+    que si leur parent a été mesuré dans Unreal (parent_exact), pour rester compatibles avec SKEL_Mannequin.
+    Renvoie (parents {canon: canon|None}, noms réels {canon: nom}, os ignorés)."""
+    actual = {n.lower(): n for n in mannequin}
+    parents = {}
+    for canon, name in actual.items():
+        if canon in MANNEQUIN_PARENTS:
+            p = MANNEQUIN_PARENTS[canon]
+            while p is not None and p not in actual:  # parent standard absent : on remonte
+                p = MANNEQUIN_PARENTS.get(p)
+            parents[canon] = p
+        elif mannequin[name].get("parent_exact"):
+            p = mannequin[name].get("parent")
+            parents[canon] = p.lower() if p and p.lower() in actual else None
+    # un os dont le parent a été écarté est écarté aussi
+    changed = True
+    while changed:
+        changed = False
+        for canon, p in list(parents.items()):
+            if p is not None and p not in parents:
+                del parents[canon]
+                changed = True
+    skipped = sorted(actual[c] for c in actual if c not in parents)
+    return parents, {c: actual[c] for c in parents}, skipped
+
+
 def retarget(bones, prims, mannequin):
-    """bones : os GMod (espace Unreal). mannequin : {nom: {"parent", "world"}} pose de référence monde.
+    """bones : os GMod (espace Unreal). mannequin : {nom: {"parent", "parent_exact", "world"}} pose de référence monde.
 
     Renvoie (os de sortie [(nom, parent, monde)], primitives reposées et repondérées)."""
-    parents = {n: (d.get("parent") if d.get("parent") in mannequin else None) for n, d in mannequin.items()}
+    parents, actual, _skipped = resolve_hierarchy(mannequin)
     order = _bfs(parents)
-    mw = {n: orthonormalize(mannequin[n]["world"]) for n in order}
+    mw = {n: orthonormalize(mannequin[actual[n]]["world"]) for n in order}
 
     # os GMod -> os Mannequin (directement, ou via l'ancêtre le plus proche)
     direct = [VALVE_TO_MANNEQUIN.get(b["name"].lower()) for b in bones]
@@ -453,7 +482,7 @@ def retarget(bones, prims, mannequin):
             joints.append([index[m] for m, _ in top] + [0] * (4 - len(top)))
             weights.append([w / t for _, w in top] + [0.0] * (4 - len(top)))
         new_prims.append(dict(prim, positions=pos, normals=nrm, joints=joints, weights=weights))
-    out_bones = [(n, parents[n], out_world[n]) for n in order]
+    out_bones = [(actual[n], actual[parents[n]] if parents[n] is not None else None, out_world[n]) for n in order]
     return out_bones, new_prims
 
 
@@ -533,9 +562,32 @@ def write(path, doc_src, out_bones, prims, name):
         json.dump(doc, f, separators=(",", ":"))
 
 
+def find_parent(name, world, local, tolerance=0.05):
+    """Retrouve le parent d'un os : celui dont la pose monde composée avec la pose locale de l'os redonne sa
+    pose monde. world/local : {nom: (t, q)}. Renvoie (parent ou None pour une racine, mesure fiable ?)."""
+    target = from_qt(world[name][1], world[name][0])
+    loc = from_qt(local[name][1], local[name][0])
+
+    def error(m):
+        dt = math.sqrt(sum((m[i][3] - target[i][3]) ** 2 for i in range(3)))
+        dr = sum(abs(m[i][j] - target[i][j]) for i in range(3) for j in range(3))
+        return dt + 10 * dr
+
+    # racine : pose locale = pose monde ; à égalité (parent à l'origine sans rotation), on préfère un vrai parent
+    best, best_err = None, error(loc) + 1e-4
+    for cand in world:
+        if cand == name:
+            continue
+        e = error(mul(from_qt(world[cand][1], world[cand][0]), loc))
+        if e < best_err - 1e-6:
+            best, best_err = cand, e
+    return best, best_err < tolerance
+
+
 def retarget_file(src_path, mannequin, out_path, name):
-    """mannequin : {nom: {"parent": str|None, "t": [x,y,z], "q": [x,y,z,w]}} en espace monde Unreal."""
-    ref = {n: {"parent": d.get("parent"), "world": from_qt(d["q"], d["t"])} for n, d in mannequin.items()}
+    """mannequin : {nom: {"parent": str|None, "parent_exact": bool, "t": [x,y,z], "q": [x,y,z,w]}}, monde Unreal."""
+    ref = {n: {"parent": d.get("parent"), "parent_exact": d.get("parent_exact", False), "world": from_qt(d["q"], d["t"])}
+           for n, d in mannequin.items()}
     doc, bones, prims = load_source(src_path)
     out_bones, new_prims = retarget(bones, prims, ref)
     write(out_path, doc, out_bones, new_prims, name)
