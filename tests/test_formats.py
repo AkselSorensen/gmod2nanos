@@ -94,3 +94,38 @@ def test_workshop_resolve_reuses_client(monkeypatch):
     monkeypatch.setattr(workshop, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
     root, items = workshop.resolve("https://steamcommunity.com/sharedfiles/filedetails/?id=42")
     assert root.title == "Chaise" and [i.id for i in items] == ["42"]
+
+
+def test_steamcmd_auto_install(tmp_path, monkeypatch):
+    import io
+    import sys
+    import tarfile
+    import zipfile
+
+    import httpx
+
+    from gmod2nanos import workshop
+
+    monkeypatch.delenv("STEAMCMD", raising=False)
+    monkeypatch.setattr(workshop.shutil, "which", lambda name: None)
+    monkeypatch.setattr(workshop, "TOOLS_DIR", tmp_path)
+    buf = io.BytesIO()
+    if sys.platform.startswith("win"):
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("steamcmd.exe", b"MZ")
+    else:
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            info = tarfile.TarInfo("steamcmd.sh")
+            info.size = 2
+            t.addfile(info, io.BytesIO(b"#!"))
+    payload = buf.getvalue()
+    calls = []
+
+    def handler(req):
+        calls.append(str(req.url))
+        return httpx.Response(200, content=payload)
+
+    monkeypatch.setattr(workshop, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    exe = workshop.find_or_install_steamcmd()
+    assert exe.startswith(str(tmp_path)) and (tmp_path / "steamcmd").exists()
+    assert workshop.find_or_install_steamcmd() == exe and len(calls) == 1

@@ -173,7 +173,7 @@ def submit_workshop(text: str, opts: Options) -> Job:
         for n, it in enumerate(items, 1):
             job.step = f"Téléchargement {n}/{len(items)} : {it.title}"
             job.add_log(f"téléchargement de « {it.title} » ({it.file_size // 1024} Ko)")
-            raw = workshop.download(it, job.dir / "work" / "dl", MAX_SIZE)
+            raw = workshop.download(it, job.dir / "work" / "dl", MAX_SIZE, job.add_log)
             job.step = f"Extraction {n}/{len(items)}"
             roots.append(_extract_any(raw, job.dir / "work" / "addons" / it.id, job))
         return roots

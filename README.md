@@ -40,9 +40,9 @@ docker run -p 8000:8000 gmod2nanos
 
 ### Téléchargement depuis le Workshop
 
-Les anciens addons ont un lien de téléchargement direct. Les plus récents passent par **SteamCMD** (connexion anonyme) :
-installe-le et mets-le dans le `PATH`, ou indique son chemin avec `STEAMCMD=/chemin/steamcmd.sh`. L'image Docker
-l'inclut.
+Les anciens addons ont un lien de téléchargement direct. Les plus récents passent par **SteamCMD** (connexion anonyme).
+Si SteamCMD n'est pas trouvé (`STEAMCMD` ou `PATH`), le site le télécharge automatiquement dans `~/.gmod2nanos/steamcmd`
+la première fois (Windows, Linux, macOS).
 
 ### Variables d'environnement
 
@@ -53,7 +53,8 @@ l'inclut.
 | `GMOD2NANOS_MAX_COLLECTION` | 50 | nombre max d'addons par collection |
 | `GMOD2NANOS_WORKERS` | 2 | conversions en parallèle |
 | `GMOD2NANOS_JOB_TTL` | 6 h | durée de conservation des résultats |
-| `STEAMCMD` | — | chemin de SteamCMD |
+| `STEAMCMD` | — | chemin de SteamCMD (sinon installé automatiquement) |
+| `GMOD2NANOS_TOOLS` | `~/.gmod2nanos` | dossier où SteamCMD est installé automatiquement |
 
 ## API
 

@@ -5,6 +5,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tarfile
+import threading
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -99,7 +103,7 @@ def resolve(text: str) -> tuple[WorkshopItem, list[WorkshopItem]]:
     return root, items
 
 
-def download(item: WorkshopItem, dest: Path, max_size: int) -> Path:
+def download(item: WorkshopItem, dest: Path, max_size: int, log=lambda m: None) -> Path:
     """Télécharge l'addon. Retourne un .gma, ou un dossier si SteamCMD fournit le contenu déjà extrait."""
     dest.mkdir(parents=True, exist_ok=True)
     if item.file_size and item.file_size > max_size:
@@ -116,27 +120,73 @@ def download(item: WorkshopItem, dest: Path, max_size: int) -> Path:
                         raise ValueError("téléchargement trop volumineux")
                     f.write(chunk)
         return out
-    return _steamcmd(item, dest)
+    return _steamcmd(item, dest, log)
 
 
-def _steamcmd(item: WorkshopItem, dest: Path) -> Path:
+STEAMCMD_URLS = {
+    "win32": "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip",
+    "linux": "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz",
+    "darwin": "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz",
+}
+TOOLS_DIR = Path(os.environ.get("GMOD2NANOS_TOOLS", Path.home() / ".gmod2nanos"))
+_install_lock = threading.Lock()
+
+
+def find_or_install_steamcmd(log=lambda m: None) -> str:
+    """Trouve SteamCMD, ou le télécharge automatiquement dans TOOLS_DIR la première fois."""
     exe = os.environ.get("STEAMCMD") or shutil.which("steamcmd") or shutil.which("steamcmd.sh")
-    if not exe:
-        raise RuntimeError(
-            "cet addon n'a pas de lien de téléchargement direct : il faut SteamCMD sur le serveur "
-            "(variable STEAMCMD ou commande steamcmd dans le PATH)"
-        )
+    if exe:
+        return exe
+    platform = "win32" if sys.platform.startswith("win") else "darwin" if sys.platform == "darwin" else "linux"
+    folder = TOOLS_DIR / "steamcmd"
+    local = folder / ("steamcmd.exe" if platform == "win32" else "steamcmd.sh")
+    with _install_lock:
+        if local.exists():
+            return str(local)
+        log("SteamCMD absent : téléchargement automatique (une seule fois)…")
+        folder.mkdir(parents=True, exist_ok=True)
+        archive = folder / Path(STEAMCMD_URLS[platform]).name
+        with _client() as c, c.stream("GET", STEAMCMD_URLS[platform]) as r:
+            r.raise_for_status()
+            with open(archive, "wb") as f:
+                for chunk in r.iter_bytes(1 << 20):
+                    f.write(chunk)
+        if archive.suffix == ".zip":
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(folder)
+        else:
+            with tarfile.open(archive) as t:
+                try:
+                    t.extractall(folder, filter="data")
+                except TypeError:  # Python < 3.11.4
+                    t.extractall(folder)
+        archive.unlink()
+        if platform != "win32":
+            local.chmod(0o755)
+        log("SteamCMD installé. Sa première mise à jour peut prendre une ou deux minutes.")
+        return str(local)
+
+
+def _steamcmd(item: WorkshopItem, dest: Path, log=lambda m: None) -> Path:
+    exe = find_or_install_steamcmd(log)
     install = dest / "steamcmd"
-    cmd = [exe, "+force_install_dir", str(install), "+login", "anonymous",
+    cmd = [exe, "+force_install_dir", str(install.resolve()), "+login", "anonymous",
            "+workshop_download_item", str(GMOD_APPID), item.id, "validate", "+quit"]
-    proc = subprocess.run(cmd, capture_output=True, timeout=1800)
-    content = install / "steamapps" / "workshop" / "content" / str(GMOD_APPID) / item.id
-    if not content.exists():
+    log("téléchargement via SteamCMD (peut prendre plusieurs minutes pour un gros addon)…")
+    proc = subprocess.run(cmd, capture_output=True, timeout=3600, stdin=subprocess.DEVNULL)
+    candidates = [
+        install / "steamapps" / "workshop" / "content" / str(GMOD_APPID) / item.id,
+        Path(exe).parent / "steamapps" / "workshop" / "content" / str(GMOD_APPID) / item.id,
+    ]
+    content = next((c for c in candidates if c.exists() and any(c.iterdir())), None)
+    if content is None:
         tail = proc.stdout.decode(errors="replace").strip().splitlines()[-3:]
         raise RuntimeError("SteamCMD n'a pas pu télécharger l'addon : " + " | ".join(tail))
-    for p in content.iterdir():
-        if p.is_file():
-            with open(p, "rb") as f:
-                if f.read(4) == b"GMAD":
-                    return p
-    return content
+    files = [p for p in content.iterdir() if p.is_file()]
+    for p in files:
+        with open(p, "rb") as f:
+            if f.read(4) == b"GMAD":
+                return p
+    # anciens addons : un .bin compressé en LZMA
+    bins = [p for p in files if p.suffix.lower() == ".bin"]
+    return bins[0] if bins else content

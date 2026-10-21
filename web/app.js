@@ -29,7 +29,7 @@ $("check").addEventListener("click", async () => {
     const info = await api("/api/workshop/" + encodeURIComponent($("workshop").value.trim()));
     const items = info.is_collection
       ? `<ul>${info.items.map((i) => `<li>${esc(i.title)} <span class="tag">${size(i.size)}</span></li>`).join("")}</ul>`
-      : `<div class="muted">${size(info.items[0].size)}${info.items[0].direct ? "" : " · nécessite SteamCMD"}</div>`;
+      : `<div class="muted">${size(info.items[0].size)}${info.items[0].direct ? "" : " · téléchargé via SteamCMD"}</div>`;
     box.innerHTML = `${info.preview_url ? `<img src="${esc(info.preview_url)}" alt="">` : ""}
       <div><b>${esc(info.title)}</b>${info.is_collection ? ` <span class="tag">collection · ${info.items.length} addons</span>` : ""}${items}</div>`;
     if (!$("title").value) $("title").placeholder = info.title;
