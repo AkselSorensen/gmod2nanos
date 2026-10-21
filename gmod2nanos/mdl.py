@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .mesh import Model, compact, fix_winding
+from .mesh import Bone, Model, compact, fix_winding
 
 VVD_VERTEX = np.dtype(
     [
@@ -45,6 +45,21 @@ class MdlHeader:
         self.texdir_count, self.texdir_offset = struct.unpack_from("<ii", data, 212)
         self.skinref_count, self.skinfamily_count, self.skin_offset = struct.unpack_from("<iii", data, 220)
         self.bodypart_count, self.bodypart_offset = struct.unpack_from("<ii", data, 232)
+
+    def bones(self) -> list[Bone]:
+        out = []
+        for i in range(self.bone_count):
+            base = self.bone_offset + i * 216
+            name_off, parent = struct.unpack_from("<ii", self.data, base)
+            pose_to_bone = np.array(struct.unpack_from("<12f", self.data, base + 96), dtype=np.float64).reshape(3, 4)
+            m = np.eye(4)
+            m[:3, :] = pose_to_bone
+            try:
+                bind = np.linalg.inv(m)
+            except np.linalg.LinAlgError:
+                bind = np.eye(4)
+            out.append(Bone(_cstr(self.data, base + name_off), parent, bind))
+        return out
 
     def textures(self) -> list[str]:
         out = []
@@ -210,6 +225,17 @@ def load_mdl(mdl_path: Path, name: str, source: str) -> tuple[Model, list[str]]:
     uv = verts["uv"]
 
     model = Model(name=name, source=source, bone_count=max(hdr.bone_count, 1))
+    joints = weights = None
+    if hdr.bone_count > 1:
+        model.bones = hdr.bones()
+        n = verts["numbones"].astype(np.int64)
+        w = verts["weights"].astype(np.float32) * (np.arange(3)[None, :] < n[:, None])
+        b = np.where(w > 0, verts["bones"], 0).astype(np.uint16)
+        b = np.minimum(b, hdr.bone_count - 1)
+        tot = w.sum(axis=1, keepdims=True)
+        w = np.where(tot > 0, w / np.maximum(tot, 1e-8), [[1, 0, 0]])
+        joints = np.pad(b, ((0, 0), (0, 1)))
+        weights = np.pad(w, ((0, 0), (0, 1))).astype(np.float32)
     for b, models in enumerate(parts):
         if not models:
             continue
@@ -226,7 +252,7 @@ def load_mdl(mdl_path: Path, name: str, source: str) -> tuple[Model, list[str]]:
                 continue
             tex_idx = skin[material] if 0 <= material < len(skin) else material
             mat = textures[tex_idx] if 0 <= tex_idx < len(textures) else f"missing_{material}"
-            sm = compact(mat, pos, nrm, uv, ids)
+            sm = compact(mat, pos, nrm, uv, ids, joints, weights)
             fix_winding(sm)
             model.submeshes.append(sm)
     if hdr.skinfamily_count > 1:

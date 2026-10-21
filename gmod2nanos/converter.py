@@ -9,12 +9,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
 from . import __version__
 from .audio import SOUND_EXTS, to_ogg
 from .gltf import DEFAULT_SCALE, write_gltf
 from .materials import MaterialResolver, TextureCache
 from .mdl import load_mdl
 from .mesh import Model
+from .retarget import is_valve_biped
 from .smd import has_triangles, parse_qc, parse_smd
 from .templates import render_assets_toml, render_lua_client, render_lua_server, render_package_toml, render_readme
 from .util import SourceFS, asset_name, pack_slug
@@ -42,6 +45,7 @@ class Report:
     pack_name: str = ""
     unreal_folder: str = ""
     static_meshes: list[dict] = field(default_factory=list)
+    skeletal_meshes: list[dict] = field(default_factory=list)
     sounds: list[dict] = field(default_factory=list)
     textures: list[str] = field(default_factory=list)
     materials: list[dict] = field(default_factory=list)
@@ -76,7 +80,8 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
     textures = TextureCache(fs, tex_dir, warn, pool)
     materials = MaterialResolver(fs, textures, warn)
     used_names: set[str] = set()
-    to_write: list[tuple[Model, list]] = []
+    to_write: list[tuple[Model, list, Path, bool]] = []
+    chars_dir = models_dir.parent / "Characters"
 
     def unique(base: str) -> str:
         name, i = "SM_" + asset_name(base), 2
@@ -91,21 +96,27 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
             warn(f"{model.source} : aucun triangle, ignoré")
             return
         mats = [materials.resolve(sm.material, search_dirs) for sm in model.submeshes]
-        to_write.append((model, mats))  # écrit après les textures, pour ne référencer que celles réussies
         for w in model.warnings:
             warn(f"{model.source} : {w}")
+        entry = {
+            "source": model.source,
+            "triangles": model.triangle_count,
+            "bones": model.bone_count,
+            "materials": sorted({m.name for m in mats}),
+        }
+        if model.bones and is_valve_biped([b.name for b in model.bones]):
+            # personnage : exporté avec son squelette, reciblé sur SKEL_Mannequin dans Unreal
+            model.name = "SK_" + model.name[3:]
+            to_write.append((model, mats, chars_dir / f"{model.name}_source.gltf", True))
+            entry |= {"key": model.name, "path": f"{opts.unreal_folder}/Characters/{model.name}"}
+            rep.skeletal_meshes.append(entry)
+            log(f"✔ {model.source} → {model.name} (personnage, {model.bone_count} os, {model.triangle_count} triangles)")
+            return
+        to_write.append((model, mats, models_dir / f"{model.name}.gltf", False))
         if model.is_skeletal:
-            warn(f"{model.source} : modèle avec {model.bone_count} os, exporté en mesh statique (pose de référence)")
-        rep.static_meshes.append(
-            {
-                "key": model.name,
-                "path": f"{opts.unreal_folder}/Models/{model.name}",
-                "source": model.source,
-                "triangles": model.triangle_count,
-                "bones": model.bone_count,
-                "materials": sorted({m.name for m in mats}),
-            }
-        )
+            warn(f"{model.source} : modèle avec {model.bone_count} os (pas un personnage complet), exporté en mesh statique")
+        entry |= {"key": model.name, "path": f"{opts.unreal_folder}/Models/{model.name}"}
+        rep.static_meshes.append(entry)
         log(f"✔ {model.source} → {model.name} ({model.triangle_count} triangles)")
 
     # --- Modèles compilés (.mdl) ---
@@ -150,8 +161,9 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
             claimed.add(r)
             try:
                 part = parse_smd(fs.find(r).read_text(encoding="utf-8", errors="replace"), name, r)
+                _merge_bones(merged, part)
                 merged.submeshes += part.submeshes
-                merged.bone_count = max(merged.bone_count, part.bone_count)
+                merged.bone_count = max(merged.bone_count, len(merged.bones), part.bone_count)
             except Exception as e:
                 rep.errors.append(f"{r} : {e}")
         export(merged, qc.cdmaterials)
@@ -190,8 +202,9 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
     if textures.pending:
         log(f"conversion de {len(textures.pending)} textures…")
     materials.drop_textures(textures.wait())
-    for model, mats in to_write:
-        write_gltf(model, mats, models_dir / f"{model.name}.gltf", "../Textures/", opts.scale)
+    for model, mats, path, skinned in to_write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_gltf(model, mats, path, "../Textures/", opts.scale, skinned=skinned)
 
     for key, rel, fut in sound_jobs:
         try:
@@ -223,8 +236,16 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
 
     # --- Fichiers du pack ---
     shutil.copyfile(UNREAL_IMPORT_SCRIPT, out / "1-unreal" / "import_gmod_pack.py")
+    shutil.copyfile(Path(__file__).parent / "retarget.py", out / "1-unreal" / "gmod2nanos_retarget.py")
     (out / "1-unreal" / "import_config.json").write_text(
-        json.dumps({"unreal_folder": opts.unreal_folder, "static_meshes": [m["key"] for m in rep.static_meshes]}, indent=2),
+        json.dumps(
+            {
+                "unreal_folder": opts.unreal_folder,
+                "static_meshes": [m["key"] for m in rep.static_meshes],
+                "characters": [{"name": m["key"], "source": f"Characters/{m['key']}_source.gltf"} for m in rep.skeletal_meshes],
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     (pack_dir / "Assets.toml").write_text(render_assets_toml(opts, rep), encoding="utf-8")
@@ -240,3 +261,21 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
         if not any(d.iterdir()):
             d.rmdir()
     return rep
+
+
+def _merge_bones(merged: Model, part: Model) -> None:
+    """Fusionne le squelette d'un .smd dans celui du modèle en cours, en réindexant les influences par nom."""
+    if not part.bones:
+        return
+    index = {b.name: i for i, b in enumerate(merged.bones)}
+    remap = []
+    for b in part.bones:
+        if b.name not in index:
+            parent = index.get(part.bones[b.parent].name, -1) if b.parent >= 0 else -1
+            merged.bones.append(type(b)(b.name, parent, b.bind))
+            index[b.name] = len(merged.bones) - 1
+        remap.append(index[b.name])
+    lut = np.array(remap, dtype=np.uint16)
+    for sm in part.submeshes:
+        if sm.joints is not None:
+            sm.joints = lut[sm.joints]

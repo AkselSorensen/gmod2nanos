@@ -10,10 +10,23 @@ Site web qui récupère des addons du **Steam Workshop de Garry's Mod** et les c
 | Modèles décompilés `.smd` (+ `.qc`, ex. via Crowbar) | → | glTF, idem |
 | Matériaux `.vmt` / textures `.vtf` | → | matériaux glTF + textures `.png` (couleur, normal map, transparence, double face) |
 | Sons `.wav` / `.mp3` / `.ogg` | → | `.ogg` utilisables **directement** (`assets://pack/Sounds/...`) |
+| Playermodels (squelette `ValveBiped`) | → | Skeletal Mesh reciblé sur `SKEL_Mannequin` + `PHYS_Mannequin`, utilisable avec `Character` |
 | Collections du Workshop | → | tous les addons de la collection dans un seul pack |
 
-Non convertis : le Lua GMod (API incompatible), les maps `.bsp`, les animations. Les modèles riggés (playermodels)
-sont exportés en mesh statique dans leur pose de référence.
+Non convertis : le Lua GMod (API incompatible), les maps `.bsp`, les animations GMod (les personnages utilisent celles de
+nanos world). Les autres modèles riggés (bras de vue, NPC non humains) sont exportés en mesh statique.
+
+### Personnages
+
+nanos world n'accepte que des personnages sur le squelette du Mannequin UE4. Le site exporte le playermodel avec son
+squelette ValveBiped (`Characters/SK_*_source.gltf`) ; le script d'import Unreal lit ensuite `SKEL_Mannequin` dans l'ADK,
+et `gmod2nanos/retarget.py` :
+
+1. tourne le modèle pour qu'il regarde dans la même direction que le Mannequin ;
+2. plie bras, mains, doigts, jambes et pieds pour reproduire la pose de référence du Mannequin (A-pose) ;
+3. lie le maillage à des os portant les noms, la hiérarchie et l'orientation du Mannequin, placés aux articulations du
+   modèle GMod (ses proportions sont conservées) ;
+4. importe le résultat et lui assigne `SKEL_Mannequin` et `PHYS_Mannequin`.
 
 ### Pourquoi passer par Unreal ?
 

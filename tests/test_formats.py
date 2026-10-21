@@ -227,3 +227,19 @@ def test_steamcmd_download_with_progress(tmp_path, monkeypatch):
     assert path.read_bytes()[:4] == b"GMAD"
     assert steps  # la progression a été signalée pendant le téléchargement
     assert workshop.download(item, tmp_path / "job2", 10**9) == path
+
+
+def test_mdl_bones_and_weights(tmp_path: Path):
+    bones = [("root", -1, (0, 0, 0)), ("arm", 0, (32, 0, 0))]
+    (tmp_path / "a.mdl").write_bytes(builders.build_mdl(bones=bones))
+    (tmp_path / "a.vvd").write_bytes(builders.build_vvd(bone_of_vertex=[0, 1, 1, 0]))
+    (tmp_path / "a.dx90.vtx").write_bytes(builders.build_vtx())
+    model, _ = load_mdl(tmp_path / "a.mdl", "SM_a", "a.mdl")
+    assert [b.name for b in model.bones] == ["root", "arm"]
+    assert model.bones[1].parent == 0
+    assert np.allclose(model.bones[1].bind[:3, 3], (32, 0, 0))
+    sm = model.submeshes[0]
+    # chaque sommet est lié à un seul os, celui du VVD
+    by_pos = {tuple(p): int(j[0]) for p, j in zip(sm.positions, sm.joints)}
+    assert by_pos[(64.0, 0.0, 0.0)] == 1 and by_pos[(0.0, 0.0, 0.0)] == 0
+    assert np.allclose(sm.weights.sum(axis=1), 1)

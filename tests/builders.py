@@ -14,7 +14,8 @@ QUAD_UV = [(0, 1), (1, 1), (1, 0), (0, 0)]
 QUAD_TRIS = [0, 2, 1, 0, 3, 2]
 
 
-def build_mdl(texture="chair_wood", cdmaterials="models/test/", skin_families=1) -> bytes:
+def build_mdl(texture="chair_wood", cdmaterials="models/test/", skin_families=1, bones=None) -> bytes:
+    """bones : liste optionnelle (nom, parent, position monde) ; par défaut un seul os sans données."""
     hdr = bytearray(408)
     hdr[0:4] = b"IDST"
     struct.pack_into("<ii", hdr, 4, 48, 1234)
@@ -24,6 +25,20 @@ def build_mdl(texture="chair_wood", cdmaterials="models/test/", skin_families=1)
 
     def here() -> int:
         return len(hdr) + len(body)
+
+    if bones:
+        bone_off = here()
+        body += bytearray(216 * len(bones))
+        for i, (name, parent, pos) in enumerate(bones):
+            base = bone_off + i * 216
+            name_off = here()
+            body += name.encode() + b"\0"
+            struct.pack_into("<ii", body, base - len(hdr), name_off - base, parent)
+            # poseToBone = inverse de la pose monde (ici une simple translation)
+            struct.pack_into("<12f", body, base - len(hdr) + 96, 1, 0, 0, -pos[0], 0, 1, 0, -pos[1], 0, 0, 1, -pos[2])
+        while len(body) % 4:
+            body += b"\0"
+        struct.pack_into("<ii", hdr, 156, len(bones), bone_off)
 
     # textures
     tex_off = here()
@@ -63,15 +78,16 @@ def build_mdl(texture="chair_wood", cdmaterials="models/test/", skin_families=1)
     return bytes(data)
 
 
-def build_vvd() -> bytes:
+def build_vvd(bone_of_vertex=None) -> bytes:
     hdr = bytearray(64)
     hdr[0:4] = b"IDSV"
     struct.pack_into("<iii", hdr, 4, 4, 1234, 1)
     struct.pack_into("<8i", hdr, 16, 4, 0, 0, 0, 0, 0, 0, 0)
     struct.pack_into("<4i", hdr, 48, 0, 64, 64, 0)
     verts = b""
-    for p, uv in zip(QUAD_POS, QUAD_UV):
-        verts += struct.pack("<3f3BB3f3f2f", 1, 0, 0, 0, 0, 0, 1, *p, 0, 0, 1, *uv)
+    for k, (p, uv) in enumerate(zip(QUAD_POS, QUAD_UV)):
+        b = bone_of_vertex[k] if bone_of_vertex else 0
+        verts += struct.pack("<3f3BB3f3f2f", 1, 0, 0, b, 0, 0, 1, *p, 0, 0, 1, *uv)
     return bytes(hdr) + verts
 
 
@@ -143,3 +159,104 @@ def addon_files() -> dict[str, bytes]:
         "sound/test/beep.wav": snd.getvalue(),
         "lua/autorun/test.lua": b"print('hi')",
     }
+
+
+# --- Personnage ValveBiped (T-pose, regarde vers +X) et Mannequin UE4 (A-pose, regarde vers +Y) ---
+
+def valve_biped_joints() -> dict[str, tuple[str | None, tuple[float, float, float]]]:
+    """os -> (parent, position monde en unités Source)."""
+    j: dict[str, tuple[str | None, tuple]] = {}
+    v = "ValveBiped.Bip01_"
+    j[v + "Pelvis"] = (None, (0, 0, 40))
+    j[v + "Spine"] = (v + "Pelvis", (0, 0, 44))
+    j[v + "Spine1"] = (v + "Spine", (0, 0, 48))
+    j[v + "Spine2"] = (v + "Spine1", (0, 0, 52))
+    j[v + "Spine4"] = (v + "Spine2", (0, 0, 56))
+    j[v + "Neck1"] = (v + "Spine4", (0, 0, 62))
+    j[v + "Head1"] = (v + "Neck1", (0, 0, 65))
+    j["hair_jiggle"] = (v + "Head1", (-2, 0, 70))
+    for S, sgn in (("L", 1), ("R", -1)):
+        p = f"{v}{S}_"
+        j[p + "Clavicle"] = (v + "Spine4", (0, 2 * sgn, 58))
+        j[p + "UpperArm"] = (p + "Clavicle", (0, 7 * sgn, 58))
+        j[p + "Forearm"] = (p + "UpperArm", (0, 18 * sgn, 58))
+        j[p + "Hand"] = (p + "Forearm", (0, 28 * sgn, 58))
+        for i, x in ((0, 1.5), (1, 1.0), (2, 0.0), (3, -0.5), (4, -1.0)):
+            base_y = 29 if i == 0 else 31
+            j[f"{p}Finger{i}"] = (p + "Hand", (x, base_y * sgn, 58))
+            j[f"{p}Finger{i}1"] = (f"{p}Finger{i}", (x + (1 if i == 0 else 0), (base_y + 1.5) * sgn, 58))
+            j[f"{p}Finger{i}2"] = (f"{p}Finger{i}1", (x + (2 if i == 0 else 0), (base_y + 2.5) * sgn, 58))
+        j[p + "Thigh"] = (v + "Pelvis", (0, 4 * sgn, 40))
+        j[p + "Calf"] = (p + "Thigh", (0, 4 * sgn, 21))
+        j[p + "Foot"] = (p + "Calf", (0, 4 * sgn, 3))
+        j[p + "Toe0"] = (p + "Foot", (4, 4 * sgn, 0.5))
+    return j
+
+
+def build_character_smd() -> bytes:
+    joints = valve_biped_joints()
+    names = list(joints)
+    idx = {n: i for i, n in enumerate(names)}
+    lines = ["version 1", "nodes"]
+    for n in names:
+        parent = joints[n][0]
+        lines.append(f'{idx[n]} "{n}" {idx[parent] if parent else -1}')
+    lines += ["end", "skeleton", "time 0"]
+    for n in names:
+        parent, pos = joints[n]
+        ppos = joints[parent][1] if parent else (0, 0, 0)
+        lines.append(f"{idx[n]} " + " ".join(f"{a - b:.4f}" for a, b in zip(pos, ppos)) + " 0 0 0")
+    lines += ["end", "triangles"]
+    children = {}
+    for n, (parent, _) in joints.items():
+        if parent:
+            children.setdefault(parent, []).append(n)
+    for n in names:
+        if n not in children:
+            continue
+        a = joints[n][1]
+        b = joints[children[n][0]][1]
+        mid = [(x + y) / 2 for x, y in zip(a, b)]
+        tri = [(mid[0] + 0.3, mid[1], mid[2]), (mid[0], mid[1] + 0.3, mid[2]), (mid[0], mid[1], mid[2] + 0.3)]
+        lines.append("skin")
+        for p in tri:
+            lines.append(f"{idx[n]} {p[0]:.4f} {p[1]:.4f} {p[2]:.4f} 0 0 1 0.5 0.5 1 {idx[n]} 1.0")
+    lines.append("end")
+    return ("\n".join(lines) + "\n").encode()
+
+
+def mannequin_reference() -> dict:
+    """Faux SKEL_Mannequin : A-pose, regarde vers +Y (gauche = +X), cm, rotations arbitraires par os."""
+    import math
+
+    from gmod2nanos.retarget import MANNEQUIN_PARENTS
+
+    d = math.sqrt(0.5)
+    arm = lambda s: (s * d, 0.0, -d)  # noqa: E731
+    pos = {"root": (0, 0, 0), "pelvis": (0, 0, 95), "spine_01": (0, 0, 105), "spine_02": (0, 0, 118),
+           "spine_03": (0, 0, 132), "neck_01": (0, 0, 150), "head": (0, 0, 160),
+           "ik_foot_root": (0, 0, 0), "ik_hand_root": (0, 0, 0), "ik_hand_gun": (50, 0, 100)}
+    for s, sg in (("l", 1), ("r", -1)):
+        ax = arm(sg)
+        up = (18 * sg, 0, 142)
+        lo = tuple(u + 30 * a for u, a in zip(up, ax))
+        ha = tuple(u + 26 * a for u, a in zip(lo, ax))
+        pos.update({f"clavicle_{s}": (4 * sg, 0, 145), f"upperarm_{s}": up, f"lowerarm_{s}": lo, f"hand_{s}": ha,
+                    f"upperarm_twist_01_{s}": tuple((u + v) / 2 for u, v in zip(up, lo)),
+                    f"lowerarm_twist_01_{s}": tuple((u + v) / 2 for u, v in zip(lo, ha)),
+                    f"thigh_{s}": (10 * sg, 0, 92), f"calf_{s}": (10 * sg, 0, 50), f"foot_{s}": (10 * sg, 0, 8),
+                    f"ball_{s}": (10 * sg, 12, 2), f"thigh_twist_01_{s}": (10 * sg, 0, 71),
+                    f"calf_twist_01_{s}": (10 * sg, 0, 29), f"ik_foot_{s}": (10 * sg, 0, 8), f"ik_hand_{s}": ha})
+        for f, off in (("thumb", 4), ("index", 3), ("middle", 0), ("ring", -2), ("pinky", -4)):
+            b = tuple(h + (3 if f == "thumb" else 10) * a for h, a in zip(ha, ax))
+            b = (b[0], b[1] + off, b[2])
+            for k in range(3):
+                pos[f"{f}_0{k + 1}_{s}"] = tuple(c + 3 * k * a for c, a in zip(b, ax))
+    ref = {}
+    for i, (n, t) in enumerate(pos.items()):
+        ang = 0.37 * (i + 1)
+        axis = (1.0, 2.0, 3.0)
+        nrm = math.sqrt(sum(c * c for c in axis))
+        q = [c / nrm * math.sin(ang / 2) for c in axis] + [math.cos(ang / 2)]
+        ref[n] = {"parent": MANNEQUIN_PARENTS[n], "t": list(map(float, t)), "q": q}
+    return ref

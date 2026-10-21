@@ -19,8 +19,45 @@ def source_to_gltf(v: np.ndarray, scale: float = 1.0) -> np.ndarray:
     return np.ascontiguousarray(v[:, [1, 2, 0]] * scale, dtype=np.float32)
 
 
-def write_gltf(model: Model, materials: list[MaterialInfo], out_path: Path, texture_prefix: str, scale: float = DEFAULT_SCALE) -> None:
-    """materials[i] correspond à model.submeshes[i]. Les textures sont référencées en URI relative."""
+_G = np.eye(4)
+_G[:3, :3] = [[0, 1, 0], [0, 0, 1], [1, 0, 0]]  # Source -> glTF (permutation circulaire)
+
+
+def matrix_to_gltf(m: np.ndarray, scale: float) -> np.ndarray:
+    out = _G @ m @ _G.T
+    out[:3, 3] *= scale
+    return out
+
+
+def quat_from_matrix(r: np.ndarray) -> list[float]:
+    """Matrice de rotation 3x3 -> quaternion [x, y, z, w] normalisé."""
+    u, _, vt = np.linalg.svd(r)
+    r = u @ vt  # ré-orthonormalise
+    t = np.trace(r)
+    if t > 0:
+        s = np.sqrt(t + 1.0) * 2
+        q = [(r[2, 1] - r[1, 2]) / s, (r[0, 2] - r[2, 0]) / s, (r[1, 0] - r[0, 1]) / s, 0.25 * s]
+    elif r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+        s = np.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2
+        q = [0.25 * s, (r[0, 1] + r[1, 0]) / s, (r[0, 2] + r[2, 0]) / s, (r[2, 1] - r[1, 2]) / s]
+    elif r[1, 1] > r[2, 2]:
+        s = np.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2
+        q = [(r[0, 1] + r[1, 0]) / s, 0.25 * s, (r[1, 2] + r[2, 1]) / s, (r[0, 2] - r[2, 0]) / s]
+    else:
+        s = np.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2
+        q = [(r[0, 2] + r[2, 0]) / s, (r[1, 2] + r[2, 1]) / s, 0.25 * s, (r[1, 0] - r[0, 1]) / s]
+    q = np.array(q)
+    return (q / np.linalg.norm(q)).tolist()
+
+
+def write_gltf(
+    model: Model, materials: list[MaterialInfo], out_path: Path, texture_prefix: str,
+    scale: float = DEFAULT_SCALE, skinned: bool = False,
+) -> None:
+    """materials[i] correspond à model.submeshes[i]. Les textures sont référencées en URI relative.
+
+    skinned=True ajoute le squelette (nœuds + skin) et les influences des sommets."""
+    skinned = skinned and bool(model.bones)
     bin_chunks: list[bytes] = []
     views, accessors = [], []
     offset = 0
@@ -88,14 +125,41 @@ def write_gltf(model: Model, materials: list[MaterialInfo], out_path: Path, text
             "material": material(m),
             "mode": 4,
         }
+        if skinned:
+            j = sm.joints if sm.joints is not None else np.zeros((len(pos), 4), np.uint16)
+            w = sm.weights if sm.weights is not None else np.tile(np.float32([1, 0, 0, 0]), (len(pos), 1))
+            w = w / np.maximum(w.sum(axis=1, keepdims=True), 1e-8)
+            j = np.where(w > 0, j, 0)
+            prim["attributes"]["JOINTS_0"] = add(np.ascontiguousarray(j, np.uint16), 34962, 5123, "VEC4")
+            prim["attributes"]["WEIGHTS_0"] = add(np.ascontiguousarray(w, np.float32), 34962, 5126, "VEC4")
         primitives.append(prim)
+
+    nodes: list[dict] = [{"name": model.name, "mesh": 0}]
+    scene_nodes = [0]
+    skins = []
+    if skinned:
+        worlds = [matrix_to_gltf(b.bind, scale) for b in model.bones]
+        for i, b in enumerate(model.bones):
+            local = worlds[i] if b.parent < 0 else np.linalg.inv(worlds[b.parent]) @ worlds[i]
+            nodes.append({"name": b.name, "translation": local[:3, 3].tolist(), "rotation": quat_from_matrix(local[:3, :3])})
+        for i, b in enumerate(model.bones):
+            if b.parent < 0:
+                scene_nodes.append(1 + i)
+            else:
+                nodes[1 + b.parent].setdefault("children", []).append(1 + i)
+        ibm = np.stack([np.linalg.inv(w).T.reshape(-1) for w in worlds]).astype(np.float32)  # colonnes d'abord
+        views_before = len(views)
+        ibm_acc = add(ibm, 0, 5126, "MAT4")
+        del views[views_before]["target"]  # pas de cible pour les inverseBindMatrices
+        nodes[0]["skin"] = 0
+        skins.append({"joints": list(range(1, len(model.bones) + 1)), "inverseBindMatrices": ibm_acc})
 
     bin_name = out_path.with_suffix(".bin").name
     doc = {
         "asset": {"version": "2.0", "generator": "gmod2nanos"},
         "scene": 0,
-        "scenes": [{"nodes": [0]}],
-        "nodes": [{"name": model.name, "mesh": 0}],
+        "scenes": [{"nodes": scene_nodes}],
+        "nodes": nodes,
         "meshes": [{"name": model.name, "primitives": primitives}],
         "materials": gl_materials,
         "buffers": [{"uri": bin_name, "byteLength": offset}],
@@ -104,6 +168,8 @@ def write_gltf(model: Model, materials: list[MaterialInfo], out_path: Path, text
         "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}],
         "extras": {"source": model.source},
     }
+    if skins:
+        doc["skins"] = skins
     if images:
         doc["images"] = images
         doc["textures"] = textures

@@ -62,6 +62,7 @@ class Job:
                 "pack_name": r["pack_name"],
                 "unreal_folder": r["unreal_folder"],
                 "static_meshes": r["static_meshes"],
+                "skeletal_meshes": r.get("skeletal_meshes", []),
                 "sounds": len(r["sounds"]),
                 "textures": len(r["textures"]),
                 "warnings": len(r["warnings"]),

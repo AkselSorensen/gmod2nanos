@@ -10,6 +10,7 @@ def _q(s: str) -> str:
 
 def render_assets_toml(opts, rep) -> str:
     meshes = "\n".join(f"        {m['key']} = {_q(m['path'])}" for m in rep.static_meshes) or "        # (aucun)"
+    skeletal = "\n".join(f"        {m['key']} = {_q(m['path'])}" for m in rep.skeletal_meshes) or "        # (aucun)"
     return f"""# Généré par gmod2nanos{f" depuis le Workshop {opts.workshop_id}" if opts.workshop_id else ""}
 # vault configurations
 [meta]
@@ -40,7 +41,9 @@ def render_assets_toml(opts, rep) -> str:
     [assets.static_meshes]
 {meshes}
 
+    # personnages reciblés sur SKEL_Mannequin : Character(Vector(), Rotator(), "{opts.pack_name}::SK_...")
     [assets.skeletal_meshes]
+{skeletal}
 
     # Les sons sont fournis en .ogg dans Sounds/ et se chargent sans Unreal :
     # Sound(Vector(), "assets://{opts.pack_name}/Sounds/<fichier>.ogg")
@@ -84,6 +87,7 @@ def render_package_toml(opts) -> str:
 
 def render_lua_server(opts, rep) -> str:
     items = "\n".join(f"    {_q(opts.pack_name + '::' + m['key'])}," for m in rep.static_meshes)
+    chars = "\n".join(f"    {_q(opts.pack_name + '::' + m['key'])}," for m in rep.skeletal_meshes)
     return f"""-- Fait apparaître tous les props convertis en grille autour de l'origine
 local PROPS = {{
 {items}
@@ -98,7 +102,16 @@ for i, asset in ipairs(PROPS) do
     Prop(Vector(x, y, 150), Rotator(), asset)
 end
 
-Console.Log("[{opts.pack_name}] " .. #PROPS .. " props générés")
+-- Personnages (playermodels) : un Character par modèle, devant les props
+local CHARACTERS = {{
+{chars}
+}}
+
+for i, asset in ipairs(CHARACTERS) do
+    Character(Vector(-300, (i - 1) * 150, 100), Rotator(0, 0, 0), asset)
+end
+
+Console.Log("[{opts.pack_name}] " .. #PROPS .. " props et " .. #CHARACTERS .. " personnages générés")
 """
 
 
@@ -132,7 +145,8 @@ Généré par gmod2nanos {version}.
 |---|---|
 | Asset Pack nanos | `{opts.pack_name}` |
 | Dossier Unreal | `Content/{opts.unreal_folder}` |
-| Modèles | {len(rep.static_meshes)} |
+| Modèles (props) | {len(rep.static_meshes)} |
+| Personnages | {len(rep.skeletal_meshes)} |
 | Textures | {len(rep.textures)} |
 | Sons (.ogg) | {len(rep.sounds)} |
 
@@ -148,6 +162,10 @@ Généré par gmod2nanos {version}.
 2. Active le plugin **Python Editor Script Plugin** s'il ne l'est pas déjà.
 3. Dans Unreal : `Tools > Execute Python Script...` et choisis `1-unreal/import_gmod_pack.py`.
    Les modèles arrivent dans `Content/{opts.unreal_folder}/Models` avec leurs matériaux, textures et une collision simple.
+   Les personnages (playermodels) sont reciblés automatiquement sur le squelette `SKEL_Mannequin` de nanos world et
+   reçoivent `PHYS_Mannequin` : ils arrivent dans `Content/{opts.unreal_folder}/Characters`. Vérifie le journal
+   (`Window > Output Log`) : si l'assignation du squelette n'a pas pu se faire, fais-la à la main
+   (clic droit sur le mesh > Skeleton > Assign Skeleton > `SKEL_Mannequin`).
 4. Cuisine le projet (`Platforms > Windows > Cook Content`).
 5. Copie le dossier cuisiné `Saved/Cooked/Windows/<Projet>/Content/{opts.unreal_folder}` dans
    `2-asset-pack/{opts.pack_name}/` (à côté de `Assets.toml`).

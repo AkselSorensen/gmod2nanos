@@ -118,13 +118,13 @@ function track(id) {
 }
 
 function showSummary(s) {
-  const rows = s.static_meshes
-    .map((m) => `<tr><td><code>${esc(s.pack_name)}::${esc(m.key)}</code>${m.bones > 1 ? ' <span class="tag warn">riggé</span>' : ""}</td><td>${esc(m.source)}</td><td>${m.triangles}</td></tr>`)
+  const rows = [...s.skeletal_meshes, ...s.static_meshes]
+    .map((m) => `<tr><td><code>${esc(s.pack_name)}::${esc(m.key)}</code>${m.key.startsWith("SK_") ? ' <span class="tag">personnage</span>' : ""}</td><td>${esc(m.source)}</td><td>${m.triangles}</td></tr>`)
     .join("");
   const skipped = Object.entries(s.skipped).map(([k, v]) => `${esc(k)} ×${v}`).join(", ");
   $("summary").innerHTML = `
     <div class="stats">
-      <div class="stat"><b>${s.static_meshes.length}</b><span>modèles</span></div>
+      <div class="stat"><b>${s.static_meshes.length + s.skeletal_meshes.length}</b><span>modèles${s.skeletal_meshes.length ? ` dont ${s.skeletal_meshes.length} perso.` : ""}</span></div>
       <div class="stat"><b>${s.textures}</b><span>textures</span></div>
       <div class="stat"><b>${s.sounds}</b><span>sons .ogg</span></div>
       <div class="stat"><b>${s.warnings + s.errors.length}</b><span>avertissements</span></div>
