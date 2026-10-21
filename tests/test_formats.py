@@ -129,3 +129,101 @@ def test_steamcmd_auto_install(tmp_path, monkeypatch):
     exe = workshop.find_or_install_steamcmd()
     assert exe.startswith(str(tmp_path)) and (tmp_path / "steamcmd").exists()
     assert workshop.find_or_install_steamcmd() == exe and len(calls) == 1
+
+
+@pytest.mark.parametrize("fmt", ["DXT1", "DXT5", "RGBA8888", "BGR888", "BGRA8888"])
+def test_vtf_fallback_matches_srctools(tmp_path: Path, fmt):
+    import io
+
+    from PIL import Image
+    from srctools.vtf import VTF, ImageFormats
+
+    from gmod2nanos.vtf import read_vtf_fallback
+
+    rng = np.random.default_rng(1)
+    src = Image.fromarray(rng.integers(0, 255, (32, 64, 4), dtype=np.uint8), "RGBA")
+    vtf = VTF(64, 32, fmt=getattr(ImageFormats, fmt))
+    vtf.get().copy_from(src.tobytes(), ImageFormats.RGBA8888)
+    vtf.compute_mipmaps()
+    buf = io.BytesIO()
+    vtf.save(buf)
+    path = tmp_path / "t.vtf"
+    path.write_bytes(buf.getvalue())
+    with open(path, "rb") as f:
+        ref = VTF.read(f)
+        ref.load()
+    expected = np.asarray(ref.get().to_PIL().convert("RGBA"), dtype=np.int16)
+    got = np.asarray(read_vtf_fallback(path).convert("RGBA"), dtype=np.int16)
+    if fmt == "BGR888":
+        expected, got = expected[..., :3], got[..., :3]
+    assert got.shape == expected.shape
+    assert np.abs(got - expected).max() <= 8  # décodeurs DXT légèrement différents
+
+
+def test_vtf_unknown_format_is_guessed(tmp_path: Path):
+    import io
+    import struct
+
+    from srctools.vtf import VTF, ImageFormats
+
+    from gmod2nanos.vtf import read_vtf
+
+    vtf = VTF(16, 16, fmt=ImageFormats.DXT5)
+    vtf.get().copy_from(bytes([10, 200, 30, 255]) * 256, ImageFormats.RGBA8888)
+    buf = io.BytesIO()
+    vtf.save(buf)
+    data = bytearray(buf.getvalue())
+    struct.pack_into("<i", data, 52, 33)  # format inconnu de srctools
+    (tmp_path / "x.vtf").write_bytes(data)
+    img = read_vtf(tmp_path / "x.vtf")
+    assert img.size == (16, 16)
+
+
+def test_workshop_download_uses_cache(tmp_path, monkeypatch):
+    import httpx
+
+    from gmod2nanos import gma as gma_mod
+    from gmod2nanos import workshop
+
+    gma_mod.write(tmp_path / "a.gma", {"sound/a.wav": b"x"})
+    payload = (tmp_path / "a.gma").read_bytes()
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        return httpx.Response(200, content=payload)
+
+    monkeypatch.setattr(workshop, "TOOLS_DIR", tmp_path / "tools")
+    monkeypatch.setattr(workshop, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    item = workshop.WorkshopItem(id="7", title="t", file_url="http://x/7", file_size=len(payload), time_updated=5)
+    steps = []
+    first = workshop.download(item, tmp_path / "j1", 10**9, progress=steps.append)
+    second = workshop.download(item, tmp_path / "j2", 10**9)
+    assert first == second and first.read_bytes() == payload
+    assert len(calls) == 1 and steps and "Mo" in steps[-1]
+    item.time_updated = 6  # addon mis à jour sur le Workshop : on retélécharge
+    workshop.download(item, tmp_path / "j3", 10**9)
+    assert len(calls) == 2
+
+
+@pytest.mark.skipif(__import__("sys").platform.startswith("win"), reason="faux SteamCMD en shell")
+def test_steamcmd_download_with_progress(tmp_path, monkeypatch):
+    from gmod2nanos import gma as gma_mod
+    from gmod2nanos import workshop
+
+    gma_mod.write(tmp_path / "src.gma", {"sound/a.wav": b"x" * 1000})
+    fake = tmp_path / "steamcmd.sh"
+    # imite SteamCMD : écrit l'addon dans <force_install_dir>/steamapps/workshop/content/4000/<id>/
+    fake.write_text(
+        '#!/bin/sh\nDIR="$2"\nOUT="$DIR/steamapps/workshop/content/4000/$7"\n'
+        f'mkdir -p "$OUT"\nsleep 1.2\ncp "{tmp_path / "src.gma"}" "$OUT/addon.gma"\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("STEAMCMD", str(fake))
+    monkeypatch.setattr(workshop, "TOOLS_DIR", tmp_path / "tools")
+    item = workshop.WorkshopItem(id="99", title="t", file_size=1000, time_updated=1)
+    steps = []
+    path = workshop.download(item, tmp_path / "job", 10**9, progress=steps.append)
+    assert path.read_bytes()[:4] == b"GMAD"
+    assert steps  # la progression a été signalée pendant le téléchargement
+    assert workshop.download(item, tmp_path / "job2", 10**9) == path

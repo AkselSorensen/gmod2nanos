@@ -18,6 +18,7 @@ from .util import safe_join
 DATA_DIR = Path(os.environ.get("GMOD2NANOS_DATA", "data")).resolve()
 MAX_SIZE = int(os.environ.get("GMOD2NANOS_MAX_BYTES", str(2 * 1024**3)))
 JOB_TTL = int(os.environ.get("GMOD2NANOS_JOB_TTL", str(6 * 3600)))
+STORED_EXTS = {".png", ".ogg", ".jpg", ".mp3"}
 _executor = ThreadPoolExecutor(max_workers=int(os.environ.get("GMOD2NANOS_WORKERS", "2")))
 
 
@@ -100,10 +101,12 @@ def _run(job: Job, prepare, opts: Options) -> None:
         out = job.dir / "out"
         rep = convert(roots, out, opts, job.add_log)
         job.step = "Création de l'archive"
-        with zipfile.ZipFile(job.zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        with zipfile.ZipFile(job.zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
             for p in sorted(out.rglob("*")):
                 if p.is_file():
-                    z.write(p, p.relative_to(out).as_posix())
+                    # PNG et OGG sont déjà compressés : les recompresser coûte du temps pour rien
+                    method = zipfile.ZIP_STORED if p.suffix.lower() in STORED_EXTS else zipfile.ZIP_DEFLATED
+                    z.write(p, p.relative_to(out).as_posix(), compress_type=method)
         job.report = rep.__dict__
         job.status = "done"
         job.step = "Terminé"
@@ -173,7 +176,10 @@ def submit_workshop(text: str, opts: Options) -> Job:
         for n, it in enumerate(items, 1):
             job.step = f"Téléchargement {n}/{len(items)} : {it.title}"
             job.add_log(f"téléchargement de « {it.title} » ({it.file_size // 1024} Ko)")
-            raw = workshop.download(it, job.dir / "work" / "dl", MAX_SIZE, job.add_log)
+            raw = workshop.download(
+                it, job.dir / "work" / "dl", MAX_SIZE, job.add_log,
+                lambda msg, n=n: setattr(job, "step", f"{n}/{len(items)} · {msg}" if len(items) > 1 else msg),
+            )
             job.step = f"Extraction {n}/{len(items)}"
             roots.append(_extract_any(raw, job.dir / "work" / "addons" / it.id, job))
         return roots

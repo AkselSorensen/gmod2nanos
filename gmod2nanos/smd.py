@@ -87,7 +87,7 @@ def _tokens(text: str) -> list[str]:
 
 def parse_qc(path: Path) -> QcInfo:
     info = QcInfo(path=path)
-    toks = _tokens(path.read_text(errors="replace"))
+    toks = _tokens(path.read_text(encoding="utf-8", errors="replace"))
     norm = lambda s: s.replace("\\", "/").lower()  # noqa: E731
     i = 0
     while i < len(toks):

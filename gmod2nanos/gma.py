@@ -72,15 +72,14 @@ def read_header(f) -> GmaInfo:
     return info
 
 
-def decompress_if_needed(path: Path) -> Path:
+def decompress_if_needed(path: Path, workdir: Path | None = None) -> Path:
     """Les fichiers téléchargés depuis l'ancien CDN du Workshop sont compressés en LZMA ("alone")."""
     with open(path, "rb") as f:
         head = f.read(4)
     if head == GMA_MAGIC:
         return path
-    out = path.with_suffix(".gma")
-    if out == path:
-        out = path.with_name(path.stem + "_dec.gma")
+    out = (workdir or path.parent) / (path.stem + "_dec.gma")
+    out.parent.mkdir(parents=True, exist_ok=True)
     dec = lzma.LZMADecompressor(format=lzma.FORMAT_ALONE)
     with open(path, "rb") as src, open(out, "wb") as dst:
         while chunk := src.read(1 << 20):
@@ -93,7 +92,16 @@ def decompress_if_needed(path: Path) -> Path:
 
 def extract(path: Path, dest: Path, max_total: int | None = None) -> GmaInfo:
     """Extrait le .gma dans dest (chemins assainis contre le path traversal)."""
-    path = decompress_if_needed(Path(path))
+    src = Path(path)
+    path = decompress_if_needed(src, dest.parent)
+    try:
+        return _extract(path, dest, max_total)
+    finally:
+        if path != src:
+            path.unlink(missing_ok=True)
+
+
+def _extract(path: Path, dest: Path, max_total: int | None) -> GmaInfo:
     dest.mkdir(parents=True, exist_ok=True)
     with open(path, "rb") as f:
         info = read_header(f)

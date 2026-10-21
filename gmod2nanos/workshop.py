@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,7 @@ class WorkshopItem:
     creator: str = ""
     app_id: int = 0
     description: str = ""
+    time_updated: int = 0
 
 
 def parse_id(text: str) -> str:
@@ -72,6 +74,7 @@ def get_details(ids: list[str], client: httpx.Client | None = None) -> list[Work
                 creator=str(d.get("creator", "")),
                 app_id=int(d.get("consumer_app_id", 0) or 0),
                 description=(d.get("description", "") or "")[:500],
+                time_updated=int(d.get("time_updated", 0) or 0),
             )
         )
     return items
@@ -103,24 +106,90 @@ def resolve(text: str) -> tuple[WorkshopItem, list[WorkshopItem]]:
     return root, items
 
 
-def download(item: WorkshopItem, dest: Path, max_size: int, log=lambda m: None) -> Path:
-    """Télécharge l'addon. Retourne un .gma, ou un dossier si SteamCMD fournit le contenu déjà extrait."""
-    dest.mkdir(parents=True, exist_ok=True)
+def _cache_dir() -> Path:
+    d = TOOLS_DIR / "cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _trim_cache(keep: Path) -> None:
+    """Supprime les plus anciens addons du cache au-delà de CACHE_MAX octets."""
+    entries = sorted(_cache_dir().iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    total = 0
+    for p in entries:
+        size = p.stat().st_size if p.is_file() else sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        total += size
+        if total > CACHE_MAX and p != keep:
+            shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+
+
+def download(item: WorkshopItem, dest: Path, max_size: int, log=lambda m: None, progress=lambda m: None) -> Path:
+    """Télécharge l'addon (ou le reprend du cache). Retourne un .gma, ou un dossier déjà extrait."""
+    with _locks_guard:
+        lock = _item_locks.setdefault(item.id, threading.Lock())
+    with lock:  # deux conversions du même addon : la seconde attend et reprend le cache
+        return _download(item, dest, max_size, log, progress)
+
+
+def _download(item: WorkshopItem, dest: Path, max_size: int, log, progress) -> Path:
     if item.file_size and item.file_size > max_size:
         raise ValueError(f"« {item.title} » est trop volumineux ({item.file_size // 1_000_000} Mo)")
+    cached = _cache_dir() / f"{item.id}_{item.time_updated}"
+    for cand in (cached.with_suffix(".gma"), cached):
+        if CACHE_MAX > 0 and cand.exists():
+            log("addon déjà téléchargé : repris du cache")
+            os.utime(cand)
+            return cand
     if item.file_url:
-        out = dest / f"{item.id}.gma.download"
-        with _client() as c, c.stream("GET", item.file_url) as r:
-            r.raise_for_status()
-            size = 0
-            with open(out, "wb") as f:
-                for chunk in r.iter_bytes(1 << 20):
-                    size += len(chunk)
-                    if size > max_size:
-                        raise ValueError("téléchargement trop volumineux")
-                    f.write(chunk)
-        return out
-    return _steamcmd(item, dest, log)
+        result = _http_download(item, cached.with_suffix(".part"), max_size, progress)
+    else:
+        with _steamcmd_lock:  # SteamCMD ne supporte pas deux instances sur le même dossier
+            result = _steamcmd(item, log, progress)
+    target = cached.with_suffix(".gma") if result.is_file() else cached
+    shutil.rmtree(target, ignore_errors=True) if target.is_dir() else target.unlink(missing_ok=True)
+    shutil.move(str(result), str(target))
+    if CACHE_MAX > 0:
+        _trim_cache(target)
+    else:  # cache désactivé : on garde le fichier dans le dossier de la conversion
+        dest.mkdir(parents=True, exist_ok=True)
+        final = dest / target.name
+        shutil.move(str(target), str(final))
+        return final
+    return target
+
+
+def _http_download(item: WorkshopItem, out: Path, max_size: int, progress) -> Path:
+    total = item.file_size or 0
+    with _client() as c, c.stream("GET", item.file_url) as r:
+        r.raise_for_status()
+        size = 0
+        with open(out, "wb") as f:
+            for chunk in r.iter_bytes(1 << 20):
+                size += len(chunk)
+                if size > max_size:
+                    raise ValueError("téléchargement trop volumineux")
+                f.write(chunk)
+                progress(_progress_text(size, total))
+    return out
+
+
+def _progress_text(done: int, total: int) -> str:
+    if total:
+        return f"Téléchargement : {done / 1e6:.0f} / {total / 1e6:.0f} Mo ({min(100, done * 100 // total)} %)"
+    return f"Téléchargement : {done / 1e6:.0f} Mo"
+
+
+def _dir_size(*dirs: Path) -> int:
+    total = 0
+    for d in dirs:
+        if d.exists():
+            for f in d.rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except OSError:
+                    pass
+    return total
 
 
 STEAMCMD_URLS = {
@@ -130,6 +199,10 @@ STEAMCMD_URLS = {
 }
 TOOLS_DIR = Path(os.environ.get("GMOD2NANOS_TOOLS", Path.home() / ".gmod2nanos"))
 _install_lock = threading.Lock()
+_steamcmd_lock = threading.Lock()
+_locks_guard = threading.Lock()
+_item_locks: dict[str, threading.Lock] = {}
+CACHE_MAX = int(os.environ.get("GMOD2NANOS_CACHE_BYTES", str(10 * 1024**3)))
 
 
 def find_or_install_steamcmd(log=lambda m: None) -> str:
@@ -167,21 +240,35 @@ def find_or_install_steamcmd(log=lambda m: None) -> str:
         return str(local)
 
 
-def _steamcmd(item: WorkshopItem, dest: Path, log=lambda m: None) -> Path:
+def _steamcmd(item: WorkshopItem, log=lambda m: None, progress=lambda m: None) -> Path:
     exe = find_or_install_steamcmd(log)
-    install = dest / "steamcmd"
-    cmd = [exe, "+force_install_dir", str(install.resolve()), "+login", "anonymous",
-           "+workshop_download_item", str(GMOD_APPID), item.id, "validate", "+quit"]
-    log("téléchargement via SteamCMD (peut prendre plusieurs minutes pour un gros addon)…")
-    proc = subprocess.run(cmd, capture_output=True, timeout=3600, stdin=subprocess.DEVNULL)
-    candidates = [
-        install / "steamapps" / "workshop" / "content" / str(GMOD_APPID) / item.id,
-        Path(exe).parent / "steamapps" / "workshop" / "content" / str(GMOD_APPID) / item.id,
-    ]
-    content = next((c for c in candidates if c.exists() and any(c.iterdir())), None)
-    if content is None:
-        tail = proc.stdout.decode(errors="replace").strip().splitlines()[-3:]
-        raise RuntimeError("SteamCMD n'a pas pu télécharger l'addon : " + " | ".join(tail))
+    install = (TOOLS_DIR / "workshop").resolve()
+    ws = install / "steamapps" / "workshop"
+    content = ws / "content" / str(GMOD_APPID) / item.id
+    shutil.rmtree(content, ignore_errors=True)
+    # pas de "validate" : il revérifie tout le contenu à chaque fois et double le temps
+    cmd = [exe, "+force_install_dir", str(install), "+login", "anonymous",
+           "+workshop_download_item", str(GMOD_APPID), item.id, "+quit"]
+    log("téléchargement via SteamCMD…")
+    out_file = install.parent / f"steamcmd_{item.id}.log"
+    install.mkdir(parents=True, exist_ok=True)
+    with open(out_file, "wb") as out:
+        proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        start = time.time()
+        while proc.poll() is None:
+            if time.time() - start > 3600:
+                proc.kill()
+                raise RuntimeError("SteamCMD a mis plus d'une heure, abandon")
+            done = _dir_size(ws / "downloads" / str(GMOD_APPID), content)
+            progress(_progress_text(done, item.file_size) if done else "Connexion à Steam (SteamCMD)…")
+            time.sleep(1)
+    if not content.exists() or not any(content.iterdir()):
+        legacy = Path(exe).parent / "steamapps" / "workshop" / "content" / str(GMOD_APPID) / item.id
+        if legacy.exists() and any(legacy.iterdir()):
+            content = legacy
+        else:
+            tail = out_file.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-3:]
+            raise RuntimeError("SteamCMD n'a pas pu télécharger l'addon : " + " | ".join(tail))
     files = [p for p in content.iterdir() if p.is_file()]
     for p in files:
         with open(p, "rb") as f:

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -17,6 +19,7 @@ from .smd import has_triangles, parse_qc, parse_smd
 from .templates import render_assets_toml, render_lua_client, render_lua_server, render_package_toml, render_readme
 from .util import SourceFS, asset_name, pack_slug
 
+WORKERS = int(os.environ.get("GMOD2NANOS_THREADS", str(min(8, (os.cpu_count() or 2)))))
 UNREAL_IMPORT_SCRIPT = Path(__file__).parent / "templates" / "import_gmod_pack.py"
 
 
@@ -62,9 +65,18 @@ def convert(roots: list[Path], out: Path, opts: Options, log: Callable[[str], No
         d.mkdir(parents=True, exist_ok=True)
 
     warn = lambda m: (rep.warnings.append(m), log("⚠ " + m))  # noqa: E731
-    textures = TextureCache(fs, tex_dir, warn)
+    pool = ThreadPoolExecutor(max_workers=WORKERS)
+    try:
+        return _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir, sounds_dir)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir, sounds_dir) -> Report:
+    textures = TextureCache(fs, tex_dir, warn, pool)
     materials = MaterialResolver(fs, textures, warn)
     used_names: set[str] = set()
+    to_write: list[tuple[Model, list]] = []
 
     def unique(base: str) -> str:
         name, i = "SM_" + asset_name(base), 2
@@ -79,7 +91,7 @@ def convert(roots: list[Path], out: Path, opts: Options, log: Callable[[str], No
             warn(f"{model.source} : aucun triangle, ignoré")
             return
         mats = [materials.resolve(sm.material, search_dirs) for sm in model.submeshes]
-        write_gltf(model, mats, models_dir / f"{model.name}.gltf", "../Textures/", opts.scale)
+        to_write.append((model, mats))  # écrit après les textures, pour ne référencer que celles réussies
         for w in model.warnings:
             warn(f"{model.source} : {w}")
         if model.is_skeletal:
@@ -137,7 +149,7 @@ def convert(roots: list[Path], out: Path, opts: Options, log: Callable[[str], No
         for r in refs:
             claimed.add(r)
             try:
-                part = parse_smd(fs.find(r).read_text(errors="replace"), name, r)
+                part = parse_smd(fs.find(r).read_text(encoding="utf-8", errors="replace"), name, r)
                 merged.submeshes += part.submeshes
                 merged.bone_count = max(merged.bone_count, part.bone_count)
             except Exception as e:
@@ -149,7 +161,7 @@ def convert(roots: list[Path], out: Path, opts: Options, log: Callable[[str], No
         if any(t in stem for t in ("_phys", "physics", "_lod", "_anims", "idle", "ragdoll")):
             rep.skipped[".smd (physique/anim/LOD)"] = rep.skipped.get(".smd (physique/anim/LOD)", 0) + 1
             continue
-        text = fs.find(key).read_text(errors="replace")
+        text = fs.find(key).read_text(encoding="utf-8", errors="replace")
         if not has_triangles(text):
             rep.skipped[".smd (animation)"] = rep.skipped.get(".smd (animation)", 0) + 1
             continue
@@ -164,15 +176,26 @@ def convert(roots: list[Path], out: Path, opts: Options, log: Callable[[str], No
     for key in fs.glob_ext(".vmt"):
         materials.resolve(key[len("materials/") : -4] if key.startswith("materials/") else key[:-4], [])
 
-    # --- Sons ---
+    # --- Sons (en parallèle avec les textures) ---
+    sound_jobs = []
     for key in fs.glob_ext(*SOUND_EXTS):
         if not key.startswith("sound/"):
             continue
         rel = Path(key[len("sound/") :]).with_suffix(".ogg")
         dst = sounds_dir / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
+        sound_jobs.append((key, rel, pool.submit(to_ogg, fs.find(key), dst)))
+
+    # --- Attente des textures, puis écriture des modèles ---
+    if textures.pending:
+        log(f"conversion de {len(textures.pending)} textures…")
+    materials.drop_textures(textures.wait())
+    for model, mats in to_write:
+        write_gltf(model, mats, models_dir / f"{model.name}.gltf", "../Textures/", opts.scale)
+
+    for key, rel, fut in sound_jobs:
         try:
-            to_ogg(fs.find(key), dst)
+            fut.result()
             uri = f"assets://{opts.pack_name}/Sounds/{rel.as_posix()}"
             rep.sounds.append({"source": key, "file": f"Sounds/{rel.as_posix()}", "uri": uri})
         except Exception as e:
@@ -201,17 +224,18 @@ def convert(roots: list[Path], out: Path, opts: Options, log: Callable[[str], No
     # --- Fichiers du pack ---
     shutil.copyfile(UNREAL_IMPORT_SCRIPT, out / "1-unreal" / "import_gmod_pack.py")
     (out / "1-unreal" / "import_config.json").write_text(
-        json.dumps({"unreal_folder": opts.unreal_folder, "static_meshes": [m["key"] for m in rep.static_meshes]}, indent=2)
+        json.dumps({"unreal_folder": opts.unreal_folder, "static_meshes": [m["key"] for m in rep.static_meshes]}, indent=2),
+        encoding="utf-8",
     )
-    (pack_dir / "Assets.toml").write_text(render_assets_toml(opts, rep))
+    (pack_dir / "Assets.toml").write_text(render_assets_toml(opts, rep), encoding="utf-8")
     test_pkg = out / "3-package-test" / f"{opts.pack_name}-test"[:64]
     (test_pkg / "Server").mkdir(parents=True, exist_ok=True)
     (test_pkg / "Client").mkdir(parents=True, exist_ok=True)
-    (test_pkg / "Package.toml").write_text(render_package_toml(opts))
-    (test_pkg / "Server" / "Index.lua").write_text(render_lua_server(opts, rep))
-    (test_pkg / "Client" / "Index.lua").write_text(render_lua_client(opts, rep))
-    (out / "LISEZMOI.md").write_text(render_readme(opts, rep, __version__))
-    (out / "rapport.json").write_text(json.dumps(rep.__dict__, indent=2, ensure_ascii=False))
+    (test_pkg / "Package.toml").write_text(render_package_toml(opts), encoding="utf-8")
+    (test_pkg / "Server" / "Index.lua").write_text(render_lua_server(opts, rep), encoding="utf-8")
+    (test_pkg / "Client" / "Index.lua").write_text(render_lua_client(opts, rep), encoding="utf-8")
+    (out / "LISEZMOI.md").write_text(render_readme(opts, rep, __version__), encoding="utf-8")
+    (out / "rapport.json").write_text(json.dumps(rep.__dict__, indent=2, ensure_ascii=False), encoding="utf-8")
     for d in (models_dir, tex_dir, sounds_dir):
         if not any(d.iterdir()):
             d.rmdir()

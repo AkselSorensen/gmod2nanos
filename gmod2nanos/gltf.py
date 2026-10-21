@@ -108,4 +108,4 @@ def write_gltf(model: Model, materials: list[MaterialInfo], out_path: Path, text
         doc["images"] = images
         doc["textures"] = textures
     out_path.with_suffix(".bin").write_bytes(b"".join(bin_chunks))
-    out_path.write_text(json.dumps(doc, indent=1))
+    out_path.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
