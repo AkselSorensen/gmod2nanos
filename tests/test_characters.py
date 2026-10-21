@@ -173,3 +173,15 @@ def test_axis_calibration_compensates_importer(tmp_path: Path):
             assert abs(got[n][i][3] - intended[n][i][3]) < 1e-3
             for j in range(3):
                 assert abs(got[n][i][j] - intended[n][i][j]) < 1e-4
+
+
+def test_hierarchy_read_from_unreal_wins():
+    """Une hiérarchie lue dans Unreal (parent_source=skeleton) prime sur la hiérarchie standard, et les os
+    non standard sans parent fiable sont écartés."""
+    ref = json.loads(NANOS_REF.read_text())
+    ref["weapon_l"].update(parent="Hand_L", parent_source="skeleton")
+    ref["ball_l"].update(parent="Foot_L", parent_source="skeleton")
+    parents, actual, skipped = rt.resolve_hierarchy(ref)
+    assert parents["weapon_l"] == "hand_l" and parents["ball_l"] == "foot_l"
+    assert "lefteye" not in parents and "LeftEye" in skipped and "head_end" not in parents
+    assert parents["pelvis"] == "root"

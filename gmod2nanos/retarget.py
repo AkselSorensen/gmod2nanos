@@ -352,13 +352,17 @@ def resolve_hierarchy(mannequin):
     actual = {n.lower(): n for n in mannequin}
     parents = {}
     for canon, name in actual.items():
-        if canon in MANNEQUIN_PARENTS:
+        d = mannequin[name]
+        if d.get("parent_source") == "skeleton":  # hiérarchie lue directement dans Unreal : fait foi
+            p = d.get("parent")
+            parents[canon] = p.lower() if p and p.lower() in actual else None
+        elif canon in MANNEQUIN_PARENTS:
             p = MANNEQUIN_PARENTS[canon]
             while p is not None and p not in actual:  # parent standard absent : on remonte
                 p = MANNEQUIN_PARENTS.get(p)
             parents[canon] = p
-        elif mannequin[name].get("parent_exact"):
-            p = mannequin[name].get("parent")
+        elif d.get("parent_exact"):
+            p = d.get("parent")
             parents[canon] = p.lower() if p and p.lower() in actual else None
     # un os dont le parent a été écarté est écarté aussi
     changed = True
@@ -620,7 +624,8 @@ def is_identity3(m, tol=1e-3):
 
 def retarget_file(src_path, mannequin, out_path, name, fix=None):
     """mannequin : {nom: {"parent": str|None, "parent_exact": bool, "t": [x,y,z], "q": [x,y,z,w]}}, monde Unreal."""
-    ref = {n: {"parent": d.get("parent"), "parent_exact": d.get("parent_exact", False), "world": from_qt(d["q"], d["t"])}
+    ref = {n: {"parent": d.get("parent"), "parent_exact": d.get("parent_exact", False),
+               "parent_source": d.get("parent_source"), "world": from_qt(d["q"], d["t"])}
            for n, d in mannequin.items()}
     doc, bones, prims = load_source(src_path)
     out_bones, new_prims = retarget(bones, prims, ref)

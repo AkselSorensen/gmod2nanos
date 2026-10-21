@@ -130,20 +130,54 @@ def pose_of(skeleton, space=None):
     return out
 
 
-def mannequin_reference(skeleton):
-    """Pose monde de SKEL_Mannequin, avec le parent de chaque os retrouvé à partir des poses locales."""
-    world = pose_of(skeleton)
+def skeleton_hierarchy(skeleton):
+    """Hiérarchie exacte du squelette, lue sur un Skeletal Mesh de l'ADK qui l'utilise (SkeletonModifier).
+    Renvoie {os: parent} ou None si indisponible."""
     try:
-        local = pose_of(skeleton, unreal.AnimPoseSpaces.LOCAL)
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        skel_path = skeleton.get_path_name()
+        candidates = registry.get_assets_by_class(unreal.TopLevelAssetPath("/Script/Engine", "SkeletalMesh"))
+        for data in candidates:
+            if not str(data.package_name).startswith("/Game/NanosWorld"):
+                continue
+            tag = str(data.get_tag_value("Skeleton") or "")
+            if skel_path.split(".")[0] not in tag:
+                continue
+            mesh = eal.load_asset(str(data.package_name))
+            modifier = unreal.SkeletonModifier()
+            if not modifier.set_skeletal_mesh(mesh):
+                continue
+            names = [str(n) for n in modifier.get_all_bone_names()]
+            out = {}
+            for n in names:
+                p = str(modifier.get_parent_name(n))
+                out[n] = p if p and p != "None" else None
+            unreal.log("gmod2nanos : hiérarchie de SKEL_Mannequin lue sur %s (%d os)" % (data.package_name, len(out)))
+            return out
     except Exception as e:
-        unreal.log_warning("gmod2nanos : poses locales indisponibles (%s), os non standard ignorés" % e)
-        local = None
+        unreal.log_warning("gmod2nanos : lecture directe de la hiérarchie impossible (%s)" % e)
+    return None
+
+
+def mannequin_reference(skeleton):
+    """Pose monde de SKEL_Mannequin, avec le parent de chaque os (lu dans l'ADK, sinon calculé)."""
+    world = pose_of(skeleton)
+    exact = skeleton_hierarchy(skeleton)
+    local = None
+    if exact is None:
+        try:
+            local = pose_of(skeleton, unreal.AnimPoseSpaces.LOCAL)
+        except Exception as e:
+            unreal.log_warning("gmod2nanos : poses locales indisponibles (%s), os non standard ignorés" % e)
     ref = {}
     for name, (t, q) in world.items():
-        parent, exact = (None, False)
-        if local is not None and name in local:
-            parent, exact = rt.find_parent(name, world, local)
-        ref[name] = {"parent": parent, "parent_exact": exact, "t": t, "q": q}
+        entry = {"parent": None, "parent_exact": False, "t": t, "q": q}
+        if exact is not None and name in exact:
+            entry.update(parent=exact[name], parent_exact=True, parent_source="skeleton")
+        elif local is not None and name in local:
+            entry["parent"], entry["parent_exact"] = rt.find_parent(name, world, local)
+            entry["parent_exact"] = False  # mesure approximative : on ne garde que les os standard
+        ref[name] = entry
     return ref
 
 
