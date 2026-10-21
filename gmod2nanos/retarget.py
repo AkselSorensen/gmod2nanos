@@ -486,8 +486,17 @@ def retarget(bones, prims, mannequin):
     return out_bones, new_prims
 
 
-def write(path, doc_src, out_bones, prims, name):
-    """Écrit le personnage reciblé en glTF (matériaux et textures repris du glTF source)."""
+def write(path, doc_src, out_bones, prims, name, fix=None):
+    """Écrit le personnage reciblé en glTF (matériaux et textures repris du glTF source).
+
+    fix : matrice 3x3 appliquée avant l'écriture pour compenser la conversion d'axes réelle de l'importeur
+    (voir solve_linear_map)."""
+    if fix is not None:
+        f4 = [list(fix[0]) + [0.0], list(fix[1]) + [0.0], list(fix[2]) + [0.0], [0.0, 0.0, 0.0, 1.0]]
+        f4i = inverse(f4)
+        out_bones = [(n, p, mul(f4, mul(w, f4i))) for n, p, w in out_bones]
+        prims = [dict(pr, positions=[vector(f4, v) for v in pr["positions"]],
+                      normals=[norm(vector(f4, v)) for v in pr["normals"]]) for pr in prims]
     chunks, views, accessors = [], [], []
     offset = 0
 
@@ -584,11 +593,36 @@ def find_parent(name, world, local, tolerance=0.05):
     return best, best_err < tolerance
 
 
-def retarget_file(src_path, mannequin, out_path, name):
+def solve_linear_map(src, dst):
+    """Matrice 3x3 A telle que dst ≈ A·src (moindres carrés), arrondie à une permutation signée si c'est le cas.
+
+    Sert à mesurer comment l'importeur d'Unreal convertit réellement les axes du glTF."""
+    sxx = [[sum(p[i] * p[j] for p in src) for j in range(3)] for i in range(3)]
+    syx = [[sum(q[i] * p[j] for p, q in zip(src, dst)) for j in range(3)] for i in range(3)]
+    sxx4 = [sxx[0] + [0.0], sxx[1] + [0.0], sxx[2] + [0.0], [0.0, 0.0, 0.0, 1.0]]
+    inv = inverse(sxx4)
+    a = [[sum(syx[i][k] * inv[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    snapped = [[float(round(v)) if abs(v - round(v)) < 0.05 else v for v in row] for row in a]
+    if all(v in (-1.0, 0.0, 1.0) for row in snapped for v in row) and all(
+        sum(abs(v) for v in row) == 1.0 for row in snapped
+    ):
+        return snapped
+    return a
+
+
+def transpose3(m):
+    return [[m[j][i] for j in range(3)] for i in range(3)]
+
+
+def is_identity3(m, tol=1e-3):
+    return all(abs(m[i][j] - (1.0 if i == j else 0.0)) < tol for i in range(3) for j in range(3))
+
+
+def retarget_file(src_path, mannequin, out_path, name, fix=None):
     """mannequin : {nom: {"parent": str|None, "parent_exact": bool, "t": [x,y,z], "q": [x,y,z,w]}}, monde Unreal."""
     ref = {n: {"parent": d.get("parent"), "parent_exact": d.get("parent_exact", False), "world": from_qt(d["q"], d["t"])}
            for n, d in mannequin.items()}
     doc, bones, prims = load_source(src_path)
     out_bones, new_prims = retarget(bones, prims, ref)
-    write(out_path, doc, out_bones, new_prims, name)
+    write(out_path, doc, out_bones, new_prims, name, fix)
     return [b[0] for b in out_bones]

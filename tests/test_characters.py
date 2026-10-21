@@ -144,3 +144,32 @@ def test_find_parent_from_local_poses():
         if n == "root":
             continue
         assert rt.find_parent(n, world, local) == (p, True), n
+
+
+def test_axis_calibration_compensates_importer(tmp_path: Path):
+    """Simule un importeur qui convertit les axes autrement que prévu (90° + miroir) : la calibration
+    mesure l'écart et le fichier réécrit donne exactement les os voulus une fois importé."""
+    _, out = _convert_character(tmp_path)
+    ref = json.loads(NANOS_REF.read_text())
+    src = str(out / "1-unreal/Eric/Characters/SK_eric_source.gltf")
+    dst = str(out / "1-unreal/Eric/Characters/SK_eric.gltf")
+    importer = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]  # échange X/Y : rotation + miroir
+
+    def fake_import(path):
+        _, bones, _ = rt.load_source(path)
+        a4 = [r + [0.0] for r in importer] + [[0.0, 0.0, 0.0, 1.0]]
+        return {b["name"]: rt.mul(a4, rt.mul(b["world"], rt.inverse(a4))) for b in bones}
+
+    rt.retarget_file(src, ref, dst, "SK_eric")
+    intended = {b["name"]: b["world"] for b in rt.load_source(dst)[1]}
+    got = fake_import(dst)
+    names = sorted(intended)
+    a = rt.solve_linear_map([rt.trans(intended[n]) for n in names], [rt.trans(got[n]) for n in names])
+    assert a == importer
+    rt.retarget_file(src, ref, dst, "SK_eric", fix=rt.transpose3(a))
+    got = fake_import(dst)
+    for n in names:
+        for i in range(3):
+            assert abs(got[n][i][3] - intended[n][i][3]) < 1e-3
+            for j in range(3):
+                assert abs(got[n][i][j] - intended[n][i][j]) < 1e-4

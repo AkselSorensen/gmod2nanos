@@ -152,6 +152,60 @@ def quat_angle(a, b):
     return math.degrees(2 * math.acos(min(1.0, d)))
 
 
+def import_gltf(path, dest, skeleton=None, physics=None):
+    """Importe un glTF ; avec skeleton, demande à Interchange d'utiliser ce squelette existant."""
+    task = unreal.AssetImportTask()
+    task.filename = path
+    task.destination_path = dest
+    task.automated = True
+    task.replace_existing = True
+    task.save = True
+    if skeleton is not None:
+        try:
+            pipeline = unreal.InterchangeGenericAssetsPipeline()
+            common = pipeline.get_editor_property("common_skeletal_meshes_and_animations_properties")
+            common.set_editor_property("skeleton", skeleton)
+            pipeline.set_editor_property("common_skeletal_meshes_and_animations_properties", common)
+            if physics is not None:
+                mesh_pipe = pipeline.get_editor_property("mesh_pipeline")
+                mesh_pipe.set_editor_property("create_physics_asset", False)
+                mesh_pipe.set_editor_property("physics_asset", physics)
+                pipeline.set_editor_property("mesh_pipeline", mesh_pipe)
+            task.set_editor_property("options", pipeline)
+        except Exception as e:
+            unreal.log_warning("gmod2nanos : options d'import Interchange indisponibles (%s)" % e)
+    asset_tools.import_asset_tasks([task])
+    return [eal.load_asset(p) for p in (task.imported_object_paths or [])]
+
+
+def find_mesh(imported, dest):
+    mesh = next((a for a in imported if isinstance(a, unreal.SkeletalMesh)), None)
+    if mesh is None:  # certaines versions ne remplissent pas imported_object_paths
+        for p in eal.list_assets(dest, recursive=True, include_folder=False):
+            a = eal.load_asset(p)
+            if isinstance(a, unreal.SkeletalMesh):
+                return a
+    return mesh
+
+
+def calibrate(out, name):
+    """Import d'essai : mesure comment Unreal convertit les axes du glTF (renvoie une matrice 3x3)."""
+    tmp = CHAR_DEST + "/_calibration_" + name
+    try:
+        mesh = find_mesh(import_gltf(out, tmp), tmp)
+        if mesh is None:
+            return None
+        got = pose_of(mesh.get_editor_property("skeleton"))
+        intended = {b["name"]: rt.trans(b["world"]) for b in rt.load_source(out)[1]}
+        names = [n for n in intended if n in got]
+        return rt.solve_linear_map([intended[n] for n in names], [got[n][0] for n in names])
+    finally:
+        try:
+            eal.delete_directory(tmp)
+        except Exception:
+            pass
+
+
 def import_character(entry, skeleton, physics, ref):
     name = entry["name"]
     src = os.path.join(HERE, FOLDER, entry["source"])
@@ -159,15 +213,17 @@ def import_character(entry, skeleton, physics, ref):
     unreal.log("gmod2nanos : reciblage de %s sur SKEL_Mannequin..." % name)
     rt.retarget_file(src, ref, out, name)
 
-    task = unreal.AssetImportTask()
-    task.filename = out
-    task.destination_path = CHAR_DEST
-    task.automated = True
-    task.replace_existing = True
-    task.save = True
-    asset_tools.import_asset_tasks([task])
-    imported = [eal.load_asset(p) for p in (task.imported_object_paths or [])]
-    mesh = next((a for a in imported if isinstance(a, unreal.SkeletalMesh)), None)
+    # 1. calibration des axes de l'importeur, puis réécriture compensée si besoin
+    axes = calibrate(out, name)
+    if axes is None:
+        unreal.log_warning("gmod2nanos : calibration des axes impossible, import sans correction")
+    elif not rt.is_identity3(axes):
+        unreal.log("gmod2nanos : conversion d'axes d'Unreal mesurée %s, correction appliquée" % axes)
+        rt.retarget_file(src, ref, out, name, fix=rt.transpose3(axes))
+
+    # 2. import définitif, directement sur SKEL_Mannequin
+    imported = import_gltf(out, CHAR_DEST, skeleton, physics)
+    mesh = find_mesh(imported, CHAR_DEST)
     if mesh is None:
         unreal.log_error("gmod2nanos : %s n'a pas été importé comme Skeletal Mesh" % name)
         return False
@@ -176,29 +232,20 @@ def import_character(entry, skeleton, physics, ref):
         eal.rename_asset(mesh.get_path_name(), expected)
         mesh = eal.load_asset(expected)
 
-    # Contrôle : les os importés doivent avoir l'orientation de ceux du Mannequin
-    try:
-        own = mesh.get_editor_property("skeleton")
-        got = pose_of(own)
-        by_canon = {n.lower(): n for n in ref}
-        errs = [quat_angle(got[by_canon[b]][1], ref[by_canon[b]]["q"]) for b in rt.REQUIRED
-                if b in by_canon and by_canon[b] in got]
-        worst = max(errs) if errs else 0
-        if worst > 5:
-            unreal.log_warning("gmod2nanos : %s : orientation des os différente du Mannequin (%.0f°), "
-                               "les animations risquent d'être déformées" % (name, worst))
-        else:
-            unreal.log("gmod2nanos : %s : orientation des os conforme (écart max %.1f°)" % (name, worst))
-    except Exception as e:
-        own = None
-        unreal.log_warning("gmod2nanos : contrôle des os impossible : %s" % e)
-
-    assigned = False
-    try:
-        mesh.set_editor_property("skeleton", skeleton)
-        assigned = mesh.get_editor_property("skeleton") == skeleton
-    except Exception as e:
-        unreal.log_warning("gmod2nanos : assignation automatique du squelette impossible (%s)" % e)
+    own = mesh.get_editor_property("skeleton")
+    assigned = own == skeleton
+    if not assigned:
+        # contrôle sur le squelette créé par l'import : les os doivent avoir l'orientation du Mannequin
+        try:
+            got = pose_of(own)
+            by_canon = {n.lower(): n for n in ref}
+            errs = [quat_angle(got[by_canon[b]][1], ref[by_canon[b]]["q"]) for b in rt.REQUIRED
+                    if b in by_canon and by_canon[b] in got]
+            worst = max(errs) if errs else 0
+            level = unreal.log_warning if worst > 5 else unreal.log
+            level("gmod2nanos : %s : écart d'orientation avec le Mannequin %.1f°" % (name, worst))
+        except Exception as e:
+            unreal.log_warning("gmod2nanos : contrôle des os impossible : %s" % e)
     if physics is not None:
         try:
             mesh.set_editor_property("physics_asset", physics)
@@ -206,7 +253,7 @@ def import_character(entry, skeleton, physics, ref):
             unreal.log_warning("gmod2nanos : PHYS_Mannequin non assigné (%s)" % e)
     eal.save_loaded_asset(mesh)
     if assigned:
-        for a in imported:  # squelette et physique créés par l'import, devenus inutiles
+        for a in imported:  # squelette et physique créés par un import précédent, devenus inutiles
             if isinstance(a, (unreal.Skeleton, unreal.PhysicsAsset)) and a not in (skeleton, physics):
                 eal.delete_asset(a.get_path_name())
         unreal.log("gmod2nanos : %s prêt (SKEL_Mannequin + PHYS_Mannequin)" % name)
