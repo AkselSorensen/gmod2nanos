@@ -77,3 +77,20 @@ def test_safe_join(tmp_path: Path):
     assert safe_join(tmp_path, "a\\b.txt") == tmp_path / "a" / "b.txt"
     for bad in ("../x", "a/../../x", "C:/x", ""):
         assert safe_join(tmp_path, bad) is None
+
+
+def test_workshop_resolve_reuses_client(monkeypatch):
+    import httpx
+
+    from gmod2nanos import workshop
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "GetCollectionDetails" in str(req.url):
+            return httpx.Response(200, json={"response": {"collectiondetails": [{"result": 9}]}})
+        return httpx.Response(200, json={"response": {"publishedfiledetails": [
+            {"result": 1, "publishedfileid": "42", "title": "Chaise", "file_url": "http://x/f", "file_size": 10, "consumer_app_id": 4000}
+        ]}})
+
+    monkeypatch.setattr(workshop, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    root, items = workshop.resolve("https://steamcommunity.com/sharedfiles/filedetails/?id=42")
+    assert root.title == "Chaise" and [i.id for i in items] == ["42"]

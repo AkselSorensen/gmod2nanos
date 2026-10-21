@@ -43,7 +43,7 @@ def workshop_info(text: str):
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(502, f"Steam ne répond pas : {e}")
+        raise HTTPException(502, str(e))
     return {
         "id": root.id,
         "title": root.title,

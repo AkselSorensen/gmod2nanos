@@ -39,11 +39,21 @@ def _client() -> httpx.Client:
     return httpx.Client(timeout=httpx.Timeout(30, read=120), follow_redirects=True, headers={"User-Agent": "gmod2nanos"})
 
 
+def _post(client: httpx.Client | None, url: str, data: dict) -> httpx.Response:
+    if client is None:
+        with _client() as c:
+            return _post(c, url, data)
+    try:
+        r = client.post(url, data=data)
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"impossible de contacter l'API Steam ({e})") from e
+    return r
+
+
 def get_details(ids: list[str], client: httpx.Client | None = None) -> list[WorkshopItem]:
     data = {"itemcount": len(ids)} | {f"publishedfileids[{i}]": v for i, v in enumerate(ids)}
-    with client or _client() as c:
-        r = c.post(f"{API}/GetPublishedFileDetails/v1/", data=data)
-        r.raise_for_status()
+    r = _post(client, f"{API}/GetPublishedFileDetails/v1/", data)
     items = []
     for d in r.json().get("response", {}).get("publishedfiledetails", []):
         if d.get("result") != 1:
@@ -65,9 +75,7 @@ def get_details(ids: list[str], client: httpx.Client | None = None) -> list[Work
 
 def get_collection_children(item_id: str, client: httpx.Client | None = None) -> list[str]:
     data = {"collectioncount": 1, "publishedfileids[0]": item_id}
-    with client or _client() as c:
-        r = c.post(f"{API}/GetCollectionDetails/v1/", data=data)
-        r.raise_for_status()
+    r = _post(client, f"{API}/GetCollectionDetails/v1/", data)
     det = r.json().get("response", {}).get("collectiondetails", [{}])[0]
     if det.get("result") != 1:
         return []
