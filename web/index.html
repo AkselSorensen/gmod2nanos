@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GMod → nanos world</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>GMod <span class="arrow">→</span> nanos world</h1>
+  <p class="tagline">Convertis les addons du Workshop Steam de Garry's Mod en Asset Pack nanos world.</p>
+</header>
+
+<main>
+  <section class="card">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="workshop" role="tab">Lien Workshop</button>
+      <button class="tab" data-tab="upload" role="tab">Envoyer un fichier</button>
+    </div>
+
+    <form id="form">
+      <div class="pane" data-pane="workshop">
+        <label for="workshop">Lien ou ID d'un addon (ou d'une collection)</label>
+        <div class="row">
+          <input id="workshop" name="workshop" placeholder="https://steamcommunity.com/sharedfiles/filedetails/?id=…" autocomplete="off">
+          <button type="button" id="check" class="secondary">Vérifier</button>
+        </div>
+        <div id="preview" class="preview" hidden></div>
+      </div>
+
+      <div class="pane" data-pane="upload" hidden>
+        <label for="file">Fichier <code>.gma</code>, <code>.zip</code> (dossier d'addon, ou modèles <code>.smd</code> + <code>.qc</code> décompilés avec Crowbar) ou <code>.smd</code></label>
+        <label class="drop" id="drop">
+          <input type="file" id="file" accept=".gma,.bin,.zip,.smd,.qc">
+          <span id="drop-text">Glisse un fichier ici ou clique pour choisir</span>
+        </label>
+      </div>
+
+      <details>
+        <summary>Options</summary>
+        <div class="grid">
+          <label>Titre du pack <input id="title" placeholder="titre de l'addon"></label>
+          <label>Auteur <input id="author" placeholder="toi"></label>
+          <label>Nom du dossier nanos <input id="pack_name" placeholder="mon-pack" pattern="[a-z0-9-]*"></label>
+          <label>Échelle (m par unité Source) <input id="scale" type="number" step="0.0001" min="0.0001" value="0.0254"></label>
+        </div>
+      </details>
+
+      <button type="submit" id="go" class="primary">Convertir</button>
+      <p id="form-error" class="error" hidden></p>
+    </form>
+  </section>
+
+  <section class="card" id="job" hidden>
+    <div class="job-head">
+      <img id="job-img" alt="" hidden>
+      <div>
+        <h2 id="job-title"></h2>
+        <p id="job-step" class="step"></p>
+      </div>
+      <a id="download" class="primary button" hidden>Télécharger le pack</a>
+    </div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="summary" hidden></div>
+    <details id="log-box">
+      <summary>Journal</summary>
+      <pre id="log"></pre>
+    </details>
+  </section>
+
+  <section class="card help">
+    <h2>Comment ça marche</h2>
+    <ol>
+      <li>Le site télécharge l'addon depuis le Workshop et l'extrait (<code>.gma</code>).</li>
+      <li>Les modèles (<code>.mdl</code> compilés, ou <code>.smd</code> décompilés) deviennent des fichiers glTF, les textures <code>.vtf</code> des PNG, les sons des <code>.ogg</code>.</li>
+      <li>Tu reçois un zip avec l'Asset Pack nanos (<code>Assets.toml</code> déjà rempli), un script qui importe tout dans Unreal en un clic, et un package Lua de test.</li>
+      <li>Dans le projet Unreal de nanos world (ADK), tu exécutes le script, tu cuisines, tu copies : c'est prêt.</li>
+    </ol>
+    <p class="muted">Les sons et les textures fonctionnent tout de suite (<code>assets://</code>). Les modèles doivent passer par Unreal : nanos world ne charge que des assets cuisinés.
+    Le Lua GMod et les maps <code>.bsp</code> ne sont pas convertis.</p>
+  </section>
+</main>
+
+<footer>Respecte les licences des créateurs du Workshop : demande leur accord avant de republier leurs assets.</footer>
+<script src="app.js"></script>
+</body>
+</html>
