@@ -13,6 +13,9 @@ import unreal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+# Unreal garde les modules Python en mémoire entre deux exécutions : on force le rechargement
+# pour ne pas utiliser la version d'un ancien pack.
+sys.modules.pop("gmod2nanos_retarget", None)
 import gmod2nanos_retarget as rt  # noqa: E402
 with open(os.path.join(HERE, "import_config.json"), encoding="utf-8") as f:
     CONFIG = json.load(f)
