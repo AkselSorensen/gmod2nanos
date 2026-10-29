@@ -106,7 +106,7 @@ function track(id) {
       $("bar").parentElement.className = "bar done";
       $("download").href = `/api/jobs/${id}/download`;
       $("download").hidden = false;
-      showSummary(job.summary);
+      showSummary(id, job.summary);
     } else if (job.status === "error") {
       $("bar").parentElement.className = "bar error";
       $("log-box").open = true;
@@ -117,9 +117,10 @@ function track(id) {
   tick();
 }
 
-function showSummary(s) {
-  const rows = [...s.skeletal_meshes, ...s.static_meshes]
-    .map((m) => `<tr><td><code>${esc(s.pack_name)}::${esc(m.key)}</code>${m.key.startsWith("SK_") ? ' <span class="tag">personnage</span>' : ""}</td><td>${esc(m.source)}</td><td>${m.triangles}</td></tr>`)
+function showSummary(jobId, s) {
+  const models = [...s.skeletal_meshes, ...s.static_meshes];
+  const rows = models
+    .map((m) => `<tr><td><input type="checkbox" class="pick" value="${esc(m.source)}" checked></td><td><code>${esc(s.pack_name)}::${esc(m.key)}</code>${m.key.startsWith("SK_") ? ' <span class="tag">personnage</span>' : ""}</td><td>${esc(m.source)}</td><td>${m.triangles}</td></tr>`)
     .join("");
   const skipped = Object.entries(s.skipped).map(([k, v]) => `${esc(k)} ×${v}`).join(", ");
   $("summary").innerHTML = `
@@ -129,11 +130,34 @@ function showSummary(s) {
       <div class="stat"><b>${s.sounds}</b><span>sons .ogg</span></div>
       <div class="stat"><b>${s.warnings + s.errors.length}</b><span>avertissements</span></div>
     </div>
-    ${rows ? `<div class="table-wrap"><table><tr><th>Clé nanos</th><th>Source</th><th>Triangles</th></tr>${rows}</table></div>` : ""}
+    ${rows ? `<div class="table-wrap"><table><tr><th></th><th>Clé nanos</th><th>Source</th><th>Triangles</th></tr>${rows}</table></div>` : ""}
+    ${models.length ? `<p><button type="button" id="content-go">Créer un content avec les modèles cochés</button> <span class="muted" id="content-count"></span></p>` : ""}
     ${s.errors.length ? `<p class="error">${s.errors.map(esc).join("<br>")}</p>` : ""}
     ${skipped ? `<p class="muted">Non convertis : ${skipped}</p>` : ""}
     <p class="muted">Ouvre <code>LISEZMOI.md</code> dans le zip pour les étapes Unreal → nanos world.</p>`;
   $("summary").hidden = false;
+
+  const picks = () => [...$("summary").querySelectorAll(".pick:checked")].map((c) => c.value);
+  const count = () => ($("content-count").textContent = `${picks().length} / ${models.length} modèles`);
+  $("summary").querySelectorAll(".pick").forEach((c) => c.addEventListener("change", count));
+  count();
+  $("content-go")?.addEventListener("click", async () => {
+    const btn = $("content-go");
+    const chosen = picks();
+    if (!chosen.length) return;
+    btn.disabled = true;
+    try {
+      const job = await api(`/api/jobs/${jobId}/content`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ models: chosen, title: $("title").value, scale: parseFloat($("scale").value) || 0.0254 }),
+      });
+      track(job.id);
+    } catch (e) {
+      $("content-count").textContent = e.message;
+      btn.disabled = false;
+    }
+  });
 }
 
 const m = location.hash.match(/job=([a-f0-9]+)/);

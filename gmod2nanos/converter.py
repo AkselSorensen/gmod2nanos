@@ -24,6 +24,9 @@ from .util import SourceFS, asset_name, pack_slug
 
 WORKERS = int(os.environ.get("GMOD2NANOS_THREADS", str(min(8, (os.cpu_count() or 2)))))
 UNREAL_IMPORT_SCRIPT = Path(__file__).parent / "templates" / "import_gmod_pack.py"
+MODEL_IMPORT_SCRIPT = Path(__file__).parent / "templates" / "import_model.py"
+CHARACTER_IMPORT_SCRIPT = Path(__file__).parent / "templates" / "import_character.py"
+CHARACTERS_MODULE = Path(__file__).parent / "templates" / "gmod2nanos_characters.py"
 
 
 @dataclass
@@ -34,10 +37,13 @@ class Options:
     unreal_folder: str = ""  # dossier racine dans Content/ d'Unreal
     scale: float = DEFAULT_SCALE
     workshop_id: str | None = None
+    models: set[str] | None = None  # sources à exporter (ex. "models/dih/denji.mdl"), None = tout
 
     def finalize(self) -> None:
         self.pack_name = pack_slug(self.pack_name or self.title)
         self.unreal_folder = asset_name(self.unreal_folder or self.pack_name.title().replace("-", ""))
+        if self.models is not None:
+            self.models = {SourceFS.norm(m) for m in self.models}
 
 
 @dataclass
@@ -91,7 +97,12 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
         used_names.add(name.lower())
         return name
 
+    def wanted(source: str) -> bool:
+        return opts.models is None or SourceFS.norm(source) in opts.models
+
     def export(model: Model, search_dirs: list[str]) -> None:
+        if not wanted(model.source):
+            return
         if not model.submeshes:
             warn(f"{model.source} : aucun triangle, ignoré")
             return
@@ -107,20 +118,23 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
         if model.bones and is_valve_biped([b.name for b in model.bones]):
             # personnage : exporté avec son squelette, reciblé sur SKEL_Mannequin dans Unreal
             model.name = "SK_" + model.name[3:]
-            to_write.append((model, mats, chars_dir / f"{model.name}_source.gltf", True))
+            to_write.append((model, mats, chars_dir / model.name / f"{model.name}_source.gltf", True))
             entry |= {"key": model.name, "path": f"{opts.unreal_folder}/Characters/{model.name}"}
             rep.skeletal_meshes.append(entry)
             log(f"✔ {model.source} → {model.name} (personnage, {model.bone_count} os, {model.triangle_count} triangles)")
             return
-        to_write.append((model, mats, models_dir / f"{model.name}.gltf", False))
+        # un dossier par modèle : à l'import Unreal, on ne prend que le dossier voulu
+        to_write.append((model, mats, models_dir / model.name / f"{model.name}.gltf", False))
         if model.is_skeletal:
             warn(f"{model.source} : modèle avec {model.bone_count} os (pas un personnage complet), exporté en mesh statique")
-        entry |= {"key": model.name, "path": f"{opts.unreal_folder}/Models/{model.name}"}
+        entry |= {"key": model.name, "path": f"{opts.unreal_folder}/Models/{model.name}/{model.name}"}
         rep.static_meshes.append(entry)
         log(f"✔ {model.source} → {model.name} ({model.triangle_count} triangles)")
 
     # --- Modèles compilés (.mdl) ---
     for key in fs.glob_ext(".mdl"):
+        if not wanted(key):
+            continue
         src = fs.find(key)
         name = unique(Path(key).stem)
         try:
@@ -169,6 +183,8 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
         export(merged, qc.cdmaterials)
 
     for key in sorted(smd_keys - claimed):
+        if not wanted(key):
+            continue
         stem = Path(key).stem.lower()
         if any(t in stem for t in ("_phys", "physics", "_lod", "_anims", "idle", "ragdoll")):
             rep.skipped[".smd (physique/anim/LOD)"] = rep.skipped.get(".smd (physique/anim/LOD)", 0) + 1
@@ -184,13 +200,14 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
             rep.errors.append(f"{key} : {e}")
             log(f"✘ {key} : {e}")
 
-    # --- Matériaux restants (textures utilisables seules) ---
-    for key in fs.glob_ext(".vmt"):
-        materials.resolve(key[len("materials/") : -4] if key.startswith("materials/") else key[:-4], [])
+    # --- Matériaux restants (textures utilisables seules) : pas en mode sélection, on ne veut que les modèles ---
+    if opts.models is None:
+        for key in fs.glob_ext(".vmt"):
+            materials.resolve(key[len("materials/") : -4] if key.startswith("materials/") else key[:-4], [])
 
     # --- Sons (en parallèle avec les textures) ---
     sound_jobs = []
-    for key in fs.glob_ext(*SOUND_EXTS):
+    for key in (fs.glob_ext(*SOUND_EXTS) if opts.models is None else []):
         if not key.startswith("sound/"):
             continue
         rel = Path(key[len("sound/") :]).with_suffix(".ogg")
@@ -204,7 +221,13 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
     materials.drop_textures(textures.wait())
     for model, mats, path, skinned in to_write:
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_gltf(model, mats, path, "../Textures/", opts.scale, skinned=skinned)
+        # chemin relatif vers Textures/ depuis le dossier du modèle (Models/<nom>/ est un niveau plus profond)
+        tex_prefix = Path(os.path.relpath(tex_dir, path.parent)).as_posix() + "/"
+        write_gltf(model, mats, path, tex_prefix, opts.scale, skinned=skinned)
+        # un script d'import par modèle, à lancer depuis Unreal sans importer les autres
+        template = CHARACTER_IMPORT_SCRIPT if skinned else MODEL_IMPORT_SCRIPT
+        script = template.read_text(encoding="utf-8").replace("__UNREAL_FOLDER__", opts.unreal_folder)
+        (path.parent / template.name).write_text(script, encoding="utf-8")
 
     for key, rel, fut in sound_jobs:
         try:
@@ -237,12 +260,13 @@ def _convert(fs, out, opts, rep, log, warn, pool, models_dir, tex_dir, pack_dir,
     # --- Fichiers du pack ---
     shutil.copyfile(UNREAL_IMPORT_SCRIPT, out / "1-unreal" / "import_gmod_pack.py")
     shutil.copyfile(Path(__file__).parent / "retarget.py", out / "1-unreal" / "gmod2nanos_retarget.py")
+    shutil.copyfile(CHARACTERS_MODULE, out / "1-unreal" / "gmod2nanos_characters.py")
     (out / "1-unreal" / "import_config.json").write_text(
         json.dumps(
             {
                 "unreal_folder": opts.unreal_folder,
                 "static_meshes": [m["key"] for m in rep.static_meshes],
-                "characters": [{"name": m["key"], "source": f"Characters/{m['key']}_source.gltf"} for m in rep.skeletal_meshes],
+                "characters": [{"name": m["key"], "source": f"Characters/{m['key']}/{m['key']}_source.gltf"} for m in rep.skeletal_meshes],
             },
             indent=2,
         ),

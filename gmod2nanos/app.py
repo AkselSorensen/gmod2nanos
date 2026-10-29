@@ -101,6 +101,24 @@ def get_job(job_id: str, log_from: int = 0):
     return _job(job_id).public(max(log_from, 0))
 
 
+class ContentRequest(BaseModel):
+    models: list[str] = Field(..., min_length=1, description="Sources des modèles à garder (ex. models/dih/denji.mdl)")
+    title: str = ""
+    pack_name: str = ""
+    scale: float = Field(DEFAULT_SCALE, gt=0, le=100)
+
+
+@app.post("/api/jobs/{job_id}/content")
+def create_content_job(job_id: str, req: ContentRequest):
+    source = _job(job_id)
+    if source.status != "done" or not source.roots:
+        raise HTTPException(409, "la conversion source n'est pas terminée")
+    report = source.report or {}
+    opts = _opts(req.title or source.title, "", req.pack_name or f"{report.get('pack_name', 'gmod-pack')}-content", req.scale)
+    opts.models = set(req.models)
+    return jobs.submit_content(source, opts).public()
+
+
 @app.get("/api/jobs/{job_id}/download")
 def download(job_id: str):
     job = _job(job_id)

@@ -85,8 +85,18 @@ def render_package_toml(opts) -> str:
 """
 
 
+def is_weapon(m) -> bool:
+    """Armes GMod (models/weapons/w_*.mdl) : attachées à la main d'un personnage, pas posées au sol.
+    Les viewmodels (v_*, c_*) gardent leurs bras et ne sont pas des armes tenables."""
+    path = m["source"].lower().replace("\\", "/")
+    return "/weapons/" in path and not path.rsplit("/", 1)[-1].startswith(("v_", "c_"))
+
+
 def render_lua_server(opts, rep) -> str:
-    items = "\n".join(f"    {_q(opts.pack_name + '::' + m['key'])}," for m in rep.static_meshes)
+    props = [m for m in rep.static_meshes if not is_weapon(m)]
+    weapons = [m for m in rep.static_meshes if is_weapon(m)]
+    items = "\n".join(f"    {_q(opts.pack_name + '::' + m['key'])}," for m in props)
+    guns = "\n".join(f"    {_q(opts.pack_name + '::' + m['key'])}," for m in weapons)
     chars = "\n".join(f"    {_q(opts.pack_name + '::' + m['key'])}," for m in rep.skeletal_meshes)
     return f"""-- Fait apparaître tous les props convertis en grille autour de l'origine
 local PROPS = {{
@@ -107,11 +117,30 @@ local CHARACTERS = {{
 {chars}
 }}
 
+local SPAWNED = {{}}
 for i, asset in ipairs(CHARACTERS) do
-    Character(Vector(-300, (i - 1) * 150, 100), Rotator(0, 0, 0), asset)
+    SPAWNED[i] = Character(Vector(-300, (i - 1) * 150, 100), Rotator(0, 0, 0), asset)
 end
 
-Console.Log("[{opts.pack_name}] " .. #PROPS .. " props et " .. #CHARACTERS .. " personnages générés")
+-- Armes GMod : chacune dans la main droite (hand_r) d'un personnage, en se répartissant entre eux.
+-- WEAPON_GRIP règle la position (cm) et l'orientation (degrés) de l'arme dans la main : à ajuster.
+local WEAPONS = {{
+{guns}
+}}
+
+local WEAPON_GRIP = {{ location = Vector(0, 0, 0), rotation = Rotator(0, 0, 0) }}
+
+for i, asset in ipairs(WEAPONS) do
+    local holder = SPAWNED[(i - 1) % math.max(#SPAWNED, 1) + 1]
+    if holder then
+        local weapon = Prop(Vector(), Rotator(), asset)
+        weapon:AttachTo(holder, "hand_r")
+        weapon:SetRelativeLocation(WEAPON_GRIP.location)
+        weapon:SetRelativeRotation(WEAPON_GRIP.rotation)
+    end
+end
+
+Console.Log("[{opts.pack_name}] " .. #PROPS .. " props, " .. #SPAWNED .. " personnages, " .. #WEAPONS .. " armes en main")
 """
 
 
@@ -161,7 +190,8 @@ Généré par gmod2nanos {version}.
 1. Installe le **nanos world ADK** (Assets Development Kit, projet Unreal fourni par nanos world) et ouvre-le.
 2. Active le plugin **Python Editor Script Plugin** s'il ne l'est pas déjà.
 3. Dans Unreal : `Tools > Execute Python Script...` et choisis `1-unreal/import_gmod_pack.py`.
-   Les modèles arrivent dans `Content/{opts.unreal_folder}/Models` avec leurs matériaux, textures et une collision simple.
+   Chaque modèle arrive dans son propre dossier `Content/{opts.unreal_folder}/Models/<nom>/` avec ses matériaux, textures et une collision simple.
+   Pour n'en importer qu'un, liste-le dans `ONLY_MODELS` au début du script.
    Les personnages (playermodels) sont reciblés automatiquement sur le squelette `SKEL_Mannequin` de nanos world et
    reçoivent `PHYS_Mannequin` : ils arrivent dans `Content/{opts.unreal_folder}/Characters`. Vérifie le journal
    (`Window > Output Log`) : si l'assignation du squelette n'a pas pu se faire, fais-la à la main

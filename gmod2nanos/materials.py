@@ -144,10 +144,15 @@ class MaterialResolver:
             i += 1
         self.used_names.add(uname)
         info = MaterialInfo(path=path, name=uname)
-        mat = _load_vmt(self.fs, f"materials/{path}")
-        if mat is None:
-            self.log(f"matériau introuvable dans l'addon : materials/{path}.vmt (probablement un contenu de base du jeu)")
+        try:
+            mat = _load_vmt(self.fs, f"materials/{path}")
+        except Exception as e:  # VMT mal formé : on garde le maillage, sans texture
+            mat = None
+            self.log(f"matériau illisible : materials/{path}.vmt ({str(e).splitlines()[0]})")
         else:
+            if mat is None:
+                self.log(f"matériau introuvable dans l'addon : materials/{path}.vmt (probablement un contenu de base du jeu)")
+        if mat is not None:
             info.found = True
             info.shader = mat.shader
             info.translucent = _truthy(mat.get("$translucent"))

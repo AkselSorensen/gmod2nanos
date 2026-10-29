@@ -32,6 +32,7 @@ class Job:
     log: list[str] = field(default_factory=list)
     error: str | None = None
     report: dict | None = None
+    roots: list[Path] = field(default_factory=list)  # addons extraits, gardés pour les conversions « content »
     created: float = field(default_factory=time.time)
 
     @property
@@ -98,6 +99,10 @@ def _run(job: Job, prepare, opts: Options) -> None:
     job.status = "running"
     try:
         roots = prepare(job)
+        job.roots = roots
+        # les téléchargements bruts ne servent plus ; les addons extraits restent pour un éventuel « content »
+        for d in ("dl", "upload"):
+            shutil.rmtree(job.dir / "work" / d, ignore_errors=True)
         job.step = "Conversion des assets"
         out = job.dir / "out"
         rep = convert(roots, out, opts, job.add_log)
@@ -111,8 +116,7 @@ def _run(job: Job, prepare, opts: Options) -> None:
         job.report = rep.__dict__
         job.status = "done"
         job.step = "Terminé"
-        for d in ("work", "out"):
-            shutil.rmtree(job.dir / d, ignore_errors=True)
+        shutil.rmtree(out, ignore_errors=True)
     except Exception as e:
         job.status = "error"
         job.error = str(e) or e.__class__.__name__
@@ -184,6 +188,20 @@ def submit_workshop(text: str, opts: Options) -> Job:
             job.step = f"Extraction {n}/{len(items)}"
             roots.append(_extract_any(raw, job.dir / "work" / "addons" / it.id, job))
         return roots
+
+    _executor.submit(_run, job, prepare, opts)
+    return job
+
+
+def submit_content(source: Job, opts: Options) -> Job:
+    """Nouvelle conversion du même addon, limitée aux modèles de opts.models."""
+    job = _new_job()
+    job.title = source.title
+    job.preview_url = source.preview_url
+
+    def prepare(job: Job) -> list[Path]:
+        job.step = "Préparation de la sélection"
+        return source.roots
 
     _executor.submit(_run, job, prepare, opts)
     return job
